@@ -44,6 +44,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * 6. W3C XML 1.0 compliance: Strict character sanitization prevents Python parse failures.
  * 7. Batched IPC on API 33+: descendants are prefetched per getChild call instead of one
  *    Binder round trip per node.
+ * 8. Current, not cached: every dump reads the screen as it is at that moment, never the
+ *    service's remembered copy of an earlier one (see dropNodeCache).
  */
 public final class HierarchyDumper {
 
@@ -103,7 +105,11 @@ public final class HierarchyDumper {
     private static final class DumpStats {
         int nodes = 0;
         int skippedInvisible = 0;
+        /** Nodes whose view no longer exists (seen by {@link #freshen} on API &lt; 34). */
+        int skippedGone = 0;
         boolean truncated = false;
+        /** True when the node cache could not be dropped, so every node is refreshed as it is read. */
+        boolean refreshNodes = false;
     }
 
     public static JSONObject dump(AccessibilityService service) {
@@ -159,6 +165,8 @@ public final class HierarchyDumper {
             result.put("success", true);
             result.put("node_count", stats.nodes);
             result.put("skipped_invisible", stats.skippedInvisible);
+            result.put("skipped_gone", stats.skippedGone);
+            result.put("node_source", stats.refreshNodes ? "refreshed" : "cache_cleared");
             result.put("truncated", stats.truncated);
             result.put("window_count", rootSnapshots.size());
             result.put("elapsed_ms", System.currentTimeMillis() - startTime);
@@ -395,6 +403,7 @@ public final class HierarchyDumper {
             DumpOptions options,
             DumpStats stats
     ) {
+        stats.refreshNodes = !dropNodeCache(service);
         List<RawRootEntry> rawRoots = Collections.emptyList();
         long[] retryBackoff = new long[]{40L, 80L, 120L, 160L, 220L, 300L};
 
@@ -437,6 +446,49 @@ public final class HierarchyDumper {
         }
 
         return snapshots;
+    }
+
+    /**
+     * Makes this dump read the screen as it is now rather than as the service's node cache
+     * remembers it.
+     *
+     * The service process keeps every node it has read in the framework's
+     * {@code AccessibilityCache}, which only changes when an invalidating event arrives. Even
+     * with those events subscribed they trail the UI (apps throttle them to one per ~100 ms),
+     * so a dump right after a swipe could still read the rows from before it. UIAutomator never
+     * sees this because {@code uiautomator dump} starts a fresh process with an empty cache.
+     *
+     * API 34+ drops the whole cache ({@code clearCache()}) and the traversal refetches it with
+     * batched prefetching. Older releases have no public way to do that ({@code setServiceInfo}
+     * clears it as a side effect, but also broadcasts a services-changed call to every app
+     * process), so the caller refreshes each node as it reads it instead.
+     *
+     * @return true when the cache was dropped; false when nodes must be refreshed one by one
+     */
+    @android.annotation.TargetApi(34)
+    private static boolean dropNodeCache(AccessibilityService service) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            try {
+                return service.clearCache();
+            } catch (Throwable t) {
+                Log.w(TAG, "clearCache failed; refreshing nodes instead", t);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Refetches {@code node} from its app, bypassing the cache, when this dump has to
+     * (see {@link #dropNodeCache}). Returns false when the view behind the node is gone.
+     */
+    private static boolean freshen(AccessibilityNodeInfo node, boolean refresh) {
+        if (!refresh) return true;
+        try {
+            return node.refresh();
+        } catch (Throwable t) {
+            // Keep what the cache had rather than lose the node over a failed round trip.
+            return true;
+        }
     }
 
     private static AccessibilityNodeInfo windowRoot(AccessibilityWindowInfo window) {
@@ -623,6 +675,12 @@ public final class HierarchyDumper {
             stats.truncated = true;
             return null;
         }
+        // Refresh before anything is read: visibility, bounds and the child list must all
+        // describe the screen now (see dropNodeCache).
+        if (!freshen(node, stats.refreshNodes)) {
+            stats.skippedGone++;
+            return null;
+        }
 
         boolean visible = true;
         try {
@@ -782,6 +840,7 @@ public final class HierarchyDumper {
      * Window roots are enumerated once and recycled; only the returned node stays alive.
      */
     public static AccessibilityNodeInfo findInputNode(AccessibilityService service) {
+        boolean refresh = !dropNodeCache(service);
         List<RawRootEntry> roots = getActiveRawRoots(service);
         AccessibilityNodeInfo found = null;
         try {
@@ -795,7 +854,7 @@ public final class HierarchyDumper {
                 } catch (Throwable ignored) {}
             }
             for (RawRootEntry entry : roots) {
-                AccessibilityNodeInfo editable = findFirstEditable(entry.root, 0);
+                AccessibilityNodeInfo editable = findFirstEditable(entry.root, 0, refresh);
                 if (editable != null) {
                     found = editable;
                     return found;
@@ -811,9 +870,10 @@ public final class HierarchyDumper {
         }
     }
 
-    private static AccessibilityNodeInfo findFirstEditable(AccessibilityNodeInfo node, int depth) {
+    private static AccessibilityNodeInfo findFirstEditable(AccessibilityNodeInfo node, int depth, boolean refresh) {
         if (node == null || depth > MAX_DEPTH) return null;
         try {
+            if (!freshen(node, refresh)) return null;
             if (node.isEditable() && node.isFocusable() && node.isEnabled() && node.isVisibleToUser()) {
                 return node;
             }
@@ -821,7 +881,7 @@ public final class HierarchyDumper {
             for (int i = 0; i < count; i++) {
                 AccessibilityNodeInfo child = childOf(node, i);
                 if (child != null) {
-                    AccessibilityNodeInfo res = findFirstEditable(child, depth + 1);
+                    AccessibilityNodeInfo res = findFirstEditable(child, depth + 1, refresh);
                     if (res != null) return res;
                     safeRecycle(child);
                 }
