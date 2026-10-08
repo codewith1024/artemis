@@ -122,3 +122,6 @@ qnh_scan_*.csv
 qnh_scan_*.mp4
 qnh_scan_*.mkv
 .a11y_backup.txt
+
+# web_scroll_record.py 的产出：录像、截图、页面文字
+web_runs/

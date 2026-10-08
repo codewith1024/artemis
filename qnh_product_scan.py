@@ -134,6 +134,50 @@ CARD_COL_SLACK = 60
 SPEC_PAT = re.compile(r"^规格[:：]")
 BARCODE_PAT = re.compile(r"^条码")
 
+# 列表卡片上的价格区：每行一个渠道图标 + 被拆成几段的价格（「￥」「45」「.00」
+# 「/份」），图标是图片，层级里没有任何文字或描述，只能按顺序认渠道。实测顺序
+# 固定为 美团闪购 / 饿了么 / 京东到家 / 采购价（采购价可能是「无数据」）。行数
+# 不是 4 的卡片不拆渠道，只留价格原文，免得把价格记到错的渠道上。
+CARD_PRICE_ROWS = 4
+PRICE_TOKEN_PAT = re.compile(r"^(￥|¥|\d+|\.\d+|/\S{1,4}|无数据)$")
+MONTH_SALES_PAT = re.compile(r"^月售[:：]\s*(\S+)")
+# 没售罄的商品在月售旁边显示「库存：2」，售罄的显示「已售罄」
+STOCK_PAT = re.compile(r"^库存[:：]\s*(\S+)")
+SOLD_OUT_TEXTS = {"已售罄", "售罄"}
+PROMO_ITEM_TEXT = "活动品"
+# 价格区最后一行下面的文字；看得到它才说明整张卡片都在屏上
+CARD_END_TEXT = "查看全部价格"
+CARD_COLUMNS = ["规格", "月售", "库存", "售罄", "活动品", "美团闪购价", "饿了么价",
+                "京东到家价", "采购价", "价格原文"]
+
+# 详情页字段（--verify-every 校验时顺带解析）。详情页顶部：开放平台标识 / SPU /
+# 条码 / SKU / 重量 / 采购价（渠道信息区块上方）；渠道信息区块：每个渠道一段
+# 「已上架(渠道名)」状态 + 渠道表格（渠道 | 零售价 | 渠道库存）。卖点 / 可售日期 /
+# 礼袋在页面更下方，解析得到的 dump 里出现的标签，出现就记。
+DETAIL_COLUMNS = ["开放平台标识", "SPU", "SKU", "重量", "采购价_详情", "采购单位_详情",
+                  "美团闪购状态", "美团闪购零售价", "美团闪购库存",
+                  "饿了么状态", "饿了么零售价", "饿了么库存",
+                  "京东到家状态", "京东到家零售价", "京东到家库存",
+                  "卖点", "可售日期", "礼袋"]
+CHANNEL_SECTION_ORDER = ["美团闪购", "饿了么", "京东到家"]
+OPEN_PLATFORM_PAT = re.compile(r"^开放平台标识[:：]\s*(\S+)")
+SPU_PAT = re.compile(r"^SPU[:：]\s*(\S+)")
+SKU_PAT = re.compile(r"^SKU[:：]\s*(\S+)")
+DETAIL_UPC_PAT = re.compile(r"^条码[:：]\s*(\S+)")
+WEIGHT_PAT = re.compile(
+    r"^\d+(?:\.\d+)?\s*(?:克|kg|KG|g|G|毫升|ml|ML|L|升|斤|两|个|袋|包|盒|罐|瓶|片|条|支|桶|杯|双|组|提)"
+    r"\s*[（(][^）)]*[）)]$")
+DETAIL_PRICE_PAT = re.compile(r"^[￥¥](\d+(?:\.\d+)?)$")
+CHANNEL_ROW_PAT = re.compile(r"^(美团闪购|饿了么|京东到家)$")
+LISTING_STATUS_PAT = re.compile(r"^(已上架|已下架|未上线)\((.+)\)$")
+DETAIL_LABEL_PATS = (
+    (re.compile(r"^卖点[:：]\s*(\S.*)$"), "卖点"),
+    (re.compile(r"^可售日期[:：]\s*(\S.*)$"), "可售日期"),
+    (re.compile(r"^礼袋[:：]\s*(\S.*)$"), "礼袋"),
+)
+PURCHASE_UNIT_TEXTS = {"单品", "袋", "罐", "盒", "瓶", "包", "份", "个", "条",
+                       "桶", "杯", "支", "片", "双", "组", "提", "箱"}
+
 # 详情页标题栏文字。React Native 把详情页叠在列表页上面、共用一个窗口，
 # 层级里两边的节点同时存在；只有看到这个标题才能确定最上层是详情页。
 DETAIL_TITLE = "商品详情"
@@ -186,6 +230,10 @@ class Ctx:
     record_out = None   # 最终交付的录像（转封装成功是 MP4，否则就是 MKV）
     out_dir = "."
     interrupted = False
+    cards = {}          # 条码 / 标题 → 列表卡片字段（规格、月售、价格），见 read_card
+    resumed_cards = {}  # 续跑：标题 → 上一轮 CSV 里的卡片列
+    details = {}        # 标题 → 详情页字段（verify 时解析），见 parse_detail
+    resumed_details = {}  # 续跑：标题 → 上一轮 CSV 里的详情列
 
 
 CTX = Ctx()
@@ -549,10 +597,157 @@ def find_products(nodes, exclude_texts):
             "tap": (title["cx"], title["cy"]),
             "box": (title["x1"], title["y1"], title["x2"], title["y2"]),
             "anchor_y": sp["y1"],
+            "spec_node": sp,
         })
 
     products.sort(key=lambda p: p["anchor_y"])
+    # 卡片字段顺手记下来：商品被点开时卡片可能只露出一半，翻页后它会被挪到
+    # 列表顶部完整露出，那时再记上。写 CSV 时才按条码 / 标题取用。
+    screen_h = max((n["y2"] for n in nodes), default=2280)
+    for i, p in enumerate(products):
+        end_y = products[i + 1]["box"][1] if i + 1 < len(products) else screen_h
+        card = read_card(nodes, p["spec_node"], end_y)
+        if card:
+            CTX.cards[p["title"]] = card
+            if p["barcode"]:
+                CTX.cards[p["barcode"]] = card
     return products
+
+
+def read_card(nodes, sp, end_y):
+    """
+    读一张商品卡片在列表上的字段：规格、月售、是否售罄、价格区每一行的原文。
+    看不到「查看全部价格」（卡片被屏幕下沿截断）时返回 None。
+    """
+    body = [n for n in nodes
+            if n["text"] and sp["y2"] - 2 <= n["y1"] < end_y
+            and n["x1"] >= sp["x1"] - CARD_COL_SLACK]
+    if not any(n["text"] == CARD_END_TEXT for n in body):
+        return None
+    # 价格被拆成几段文字，按行（中心 y 相近）拼回去
+    rows = []
+    for t in sorted((n for n in body if PRICE_TOKEN_PAT.match(n["text"])),
+                    key=lambda n: (n["cy"], n["x1"])):
+        if rows and abs(t["cy"] - rows[-1][-1]["cy"]) <= 25:
+            rows[-1].append(t)
+        else:
+            rows.append([t])
+    prices = ["".join(n["text"] for n in sorted(r, key=lambda n: n["x1"]))
+              for r in rows]
+    prices = [p.lstrip("￥¥") for p in prices if p[0] in "￥¥" or p == "无数据"]
+    month = next((MONTH_SALES_PAT.match(n["text"]).group(1) for n in body
+                  if MONTH_SALES_PAT.match(n["text"])), "")
+    stock = next((STOCK_PAT.match(n["text"]).group(1) for n in body
+                  if STOCK_PAT.match(n["text"])), "")
+    return {"spec": SPEC_PAT.sub("", sp["text"]).strip(),
+            "month_sales": month,
+            "stock": stock,
+            "sold_out": any(n["text"] in SOLD_OUT_TEXTS for n in body),
+            "promo_item": any(n["text"] == PROMO_ITEM_TEXT for n in body),
+            "prices": prices}
+
+
+def card_cols(title, barcode):
+    """CSV 里 CARD_COLUMNS 那几列；这一轮没读到完整卡片时用续跑载入的，再没有就留空。"""
+    c = (barcode and CTX.cards.get(barcode)) or CTX.cards.get(title)
+    if not c:
+        return CTX.resumed_cards.get(title, [""] * len(CARD_COLUMNS))
+    p = c["prices"]
+    split = len(p) == CARD_PRICE_ROWS
+    return [c["spec"], c["month_sales"], c["stock"], "是" if c["sold_out"] else "否",
+            "是" if c["promo_item"] else "否",
+            *(p[:3] if split else ["", "", ""]),
+            p[3] if split else "",
+            " | ".join(p)]
+
+
+def parse_detail(nodes, detail=None):
+    """
+    把详情页当前可见的字段解析出来，合并进 detail（后到的覆盖先到的）。
+
+    详情页叠在列表上时底下有列表的幽灵节点，但它们没有「开放平台标识:」
+    这类标签文字，也没有裸的渠道名，不会干扰。
+    """
+    detail = {} if detail is None else detail
+    texts = [n for n in nodes if n["text"] and "kaixin" not in n["text"]]
+    # 渠道信息区块的位置：采购价表格的值都在它上方
+    section_y = next((n["y1"] for n in texts if n["text"] == "渠道信息"), None)
+    for pat, key in ((OPEN_PLATFORM_PAT, "开放平台标识"), (SPU_PAT, "SPU"),
+                     (SKU_PAT, "SKU"), (DETAIL_UPC_PAT, "条码"),
+                     *DETAIL_LABEL_PATS):
+        for n in texts:
+            m = pat.match(n["text"])
+            if m:
+                detail[key] = m.group(1)
+    # 采购价表格的左列：规格/重量表头下面从上到下是 规格、重量、采购单位
+    # 三行，如「-」「75克(g)」「单品」或「组合品(1)」。最后一行是采购单位。
+    header = next((n for n in texts if n["text"] == "规格/重量"), None)
+    if header:
+        left_col = [n for n in texts
+                    if n is not header
+                    and n["x1"] < 300 and n["w"] < 320
+                    and header["y2"] - 2 <= n["y1"]
+                    and (section_y is None or n["y2"] < section_y)]
+        left_col.sort(key=lambda n: n["y1"])
+        if "重量" not in detail:
+            for n in left_col:
+                if WEIGHT_PAT.match(n["text"]):
+                    detail["重量"] = n["text"]
+                    break
+        if "采购单位_详情" not in detail and left_col:
+            last = left_col[-1]["text"]
+            if last != "-" and not WEIGHT_PAT.match(last):
+                detail["采购单位_详情"] = last
+    # 表头没渲染出来时的兜底：裸单位词
+    if "采购单位_详情" not in detail:
+        units = [n for n in texts if n["text"] in PURCHASE_UNIT_TEXTS
+                 and n["x1"] < 300 and n["w"] < 320]
+        if units:
+            detail["采购单位_详情"] = units[-1]["text"]
+    # 渠道上架状态：状态写在区块标题里，如「已上架(美团闪购)」
+    for n in texts:
+        m = LISTING_STATUS_PAT.match(n["text"])
+        if m:
+            detail[m.group(2) + "状态"] = m.group(1)
+    # 采购价：渠道信息区块上方最上面的 ¥ 价格（区块下方的 ¥ 是渠道零售价）
+    if "采购价_详情" not in detail:
+        prices = sorted((n for n in texts if DETAIL_PRICE_PAT.match(n["text"])),
+                        key=lambda n: n["y1"])
+        if prices:
+            above = [n for n in prices if section_y is None or n["y2"] < section_y]
+            p = above[0] if above else prices[0]
+            detail["采购价_详情"] = DETAIL_PRICE_PAT.match(p["text"]).group(1)
+    # 渠道表格：渠道名所在行里，右边依次是 ¥零售价、库存（售罄时是「售罄」）
+    for cn in (n for n in texts if CHANNEL_ROW_PAT.match(n["text"])):
+        row = [n for n in texts
+               if n is not cn and abs(n["cy"] - cn["cy"]) <= 25]
+        price_nodes = [n for n in row
+                       if DETAIL_PRICE_PAT.match(n["text"]) and n["x1"] > cn["x1"]]
+        stock_nodes = [n for n in row
+                       if (re.fullmatch(r"\d+", n["text"])
+                           or n["text"] in SOLD_OUT_TEXTS)
+                       and price_nodes
+                       and n["x1"] > price_nodes[0]["x1"]]
+        if price_nodes:
+            detail[cn["text"] + "零售价"] = DETAIL_PRICE_PAT.match(
+                price_nodes[0]["text"]).group(1)
+        if stock_nodes:
+            detail[cn["text"] + "库存"] = stock_nodes[0]["text"]
+    return detail
+
+
+def channels_complete(detail):
+    """三个渠道的零售价和库存都见过；缺一个就值得滚回页顶补一次。"""
+    return all(c + "零售价" in detail and c + "库存" in detail
+               for c in CHANNEL_SECTION_ORDER)
+
+
+def detail_cols(title):
+    """CSV 里 DETAIL_COLUMNS 那几列；这一轮没采到详情时用续跑载入的，再没有就留空。"""
+    d = CTX.details.get(title)
+    if d is None:
+        return CTX.resumed_details.get(title, [""] * len(DETAIL_COLUMNS))
+    return [d.get(c, "") for c in DETAIL_COLUMNS]
 
 
 # --------------------------------------------------------------------------
@@ -953,9 +1148,32 @@ def video_offset():
 # 收尾
 # --------------------------------------------------------------------------
 
-CSV_COLUMNS = ["序号", "商品名称", "条码", "店内码", "货号",
-               "状态", "视频时间点", "时刻"]
+CSV_COLUMNS_LEGACY = ["序号", "商品名称", "条码", "店内码", "货号",
+                      "状态", "视频时间点", "时刻"]
+CSV_COLUMNS = CSV_COLUMNS_LEGACY + ["采集时间", "证据前缀"]
 RESUME_DONE = {"成功", "自建商品"}     # 续跑时视为已完成、不再点开的状态
+
+
+def capture_meta(now=None):
+    """当前行的本地时间、完整 ISO 时间，以及 CSV / 录像共用的文件名前缀。"""
+    now = now or datetime.now()
+    prefix = os.path.abspath(os.path.join(CTX.out_dir, f"qnh_scan_{CTX.run_stamp}"))
+    return [now.strftime("%H:%M:%S"), now.isoformat(timespec="seconds"), prefix]
+
+
+def resume_meta(path, row):
+    """兼容旧 CSV：没有完整时间/证据前缀时，从旧文件名和「时刻」补出来。"""
+    prefix = row.get("证据前缀") or os.path.splitext(os.path.abspath(path))[0]
+    collected = row.get("采集时间")
+    if not collected:
+        m = re.search(r"qnh_scan_(\d{8})-\d{6}", os.path.basename(prefix))
+        if m and row.get("时刻"):
+            try:
+                collected = datetime.strptime(
+                    f"{m.group(1)} {row['时刻']}", "%Y%m%d %H:%M:%S").isoformat()
+            except ValueError:
+                collected = ""
+    return [row.get("时刻", ""), collected or "", prefix]
 
 
 def load_resume(path):
@@ -964,7 +1182,7 @@ def load_resume(path):
         die(f"--resume 指定的文件不存在：{path}")
     with open(path, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
-    if not rows or any(c not in rows[0] for c in CSV_COLUMNS):
+    if not rows or any(c not in rows[0] for c in CSV_COLUMNS_LEGACY):
         die(f"{path} 不是本脚本输出的结果（缺少列，或是空文件）")
     kept = [r for r in rows if r["状态"] in RESUME_DONE]
     # 旧版本会把停在屏幕底部、条码行被截掉的标品误判成自建商品，翻页后又
@@ -987,8 +1205,16 @@ def load_resume(path):
     CTX.resumed = len(kept)
     # 清理后序号会有空洞，而新行按"已有行数 + 1"编号，所以统一重新编号
     CTX.rows = [[i, r["商品名称"], r["条码"], r["店内码"],
-                 r["货号"], r["状态"], r["视频时间点"], r["时刻"]]
+                 r["货号"], r["状态"], r["视频时间点"],
+                 *resume_meta(path, r)]
                 for i, r in enumerate(kept, 1)]
+    # 旧版 CSV 没有的列组按存在与否带过来；这一轮翻页时重新读到的会覆盖它
+    if all(c in rows[0] for c in CARD_COLUMNS):
+        CTX.resumed_cards = {r["商品名称"]: [r[c] for c in CARD_COLUMNS]
+                             for r in kept}
+    if all(c in rows[0] for c in DETAIL_COLUMNS):
+        CTX.resumed_details = {r["商品名称"]: [r[c] for c in DETAIL_COLUMNS]
+                               for r in kept}
     redo = sum(1 for r in rows if r["状态"] not in RESUME_DONE)
     info(f"续跑：从 {os.path.basename(path)} 载入已完成的 {len(kept)} 个（只翻页经过），"
          f"另外 {redo} 个未完成的会重做。"
@@ -1001,8 +1227,9 @@ def write_csv():
     path = os.path.join(CTX.out_dir, f"qnh_scan_{CTX.run_stamp}.csv")
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(CSV_COLUMNS)
-        w.writerows(CTX.rows)
+        w.writerow(CSV_COLUMNS + CARD_COLUMNS + DETAIL_COLUMNS)
+        w.writerows(r + card_cols(r[1], r[2]) + detail_cols(r[1])
+                    for r in CTX.rows)
     return path
 
 
@@ -1038,10 +1265,12 @@ def calibrate_detail_scrolls(prod, sw, sh_, pace, max_scrolls):
     wait_while_dialog("点商品前")
     if not open_detail(prod, load):
         warn(f"标定样本「{prod['title'][:20]}」的详情页没打开")
-        return 0, False, [], None
+        return 0, False, [], None, {}
 
+    detail = parse_detail_with_retry(lambda: dump_xml())
     nodes = dump_nodes_undisturbed("详情页")
     found, values = find_target_field(nodes)
+    detail = parse_detail(nodes, detail)
     n_scroll = 0
 
     x_mid = sw // 2
@@ -1053,6 +1282,10 @@ def calibrate_detail_scrolls(prod, sw, sh_, pace, max_scrolls):
         nap(pause)
         nodes = dump_nodes_undisturbed("详情页")
         found, values = find_target_field(nodes)
+        detail = parse_detail(nodes, detail)
+
+    if "SPU" not in detail or not channels_complete(detail):
+        detail = parse_top_detail(detail)
 
     back = find_back_button(nodes, sw, sh_)
 
@@ -1068,7 +1301,29 @@ def calibrate_detail_scrolls(prod, sw, sh_, pace, max_scrolls):
     wait_while_dialog("返回前")
     tap_back(back)
     nap(settle)
-    return n_scroll, found, values, back
+    return n_scroll, found, values, back, detail
+
+
+def parse_detail_with_retry(nodes_fn, detail=None, tries=3, wait=0.7):
+    """
+    解析详情页字段，带重试：详情页刚打开时内容可能还没渲染出来（dump 只有
+    标题栏），等一拍重抓，最多 tries 次。已解析进 detail 的字段不丢。
+    """
+    for attempt in range(tries):
+        detail = parse_detail(parse_nodes(nodes_fn()), detail)
+        if detail:
+            return detail
+        time.sleep(wait)
+    return detail
+
+
+def parse_top_detail(detail=None, tries=3):
+    """滚回详情页顶部，把顶部字段（开放平台标识 / SPU / 渠道信息）补齐一次。"""
+    x1, y1, y2 = 540, 300, 1700
+    for _ in range(6):
+        human_swipe(x1, y1, x1, y2, (300, 400))
+        time.sleep(0.5)
+    return parse_detail_with_retry(lambda: dump_xml(), detail, tries=tries)
 
 
 def find_back_button(nodes, sw, sh_):
@@ -1094,23 +1349,29 @@ def tap_back(back):
 
 def same_product(a, b):
     """
-    标题相同或条码相同，任一满足就是同一个商品。
-    不能用"有条码用条码、没有就用标题"这种单一键：商品停在屏幕边缘时条码
-    那一行可能被截掉，同一个商品这次读到条码、下次读不到，键就对不上，
-    实测因此被重复访问过。
+    两边都有条码时以条码为准；任一边没条码时才退回标题。
+
+    旧逻辑是「标题或条码任一相同」，会把同名但条码不同的两个商品合并掉。
+    find_products 已经会跳过条码行被屏幕下沿截断的卡片，所以正常情况下同一商品
+    不会一会儿有条码、一会儿没有；保留标题回退只为真正没有条码的自建商品。
     """
-    return a["title"] == b["title"] or bool(a["barcode"]
-                                            and a["barcode"] == b["barcode"])
+    abc = (a.get("barcode") or "").strip()
+    bbc = (b.get("barcode") or "").strip()
+    if abc and bbc:
+        return abc == bbc
+    return a["title"] == b["title"]
 
 
 def done_marks():
-    """已处理商品的（条码集合, 标题集合）。"""
-    return ({r[2] for r in CTX.rows if r[2]}, {r[1] for r in CTX.rows})
+    """已处理商品的（条码集合, 无条码商品标题集合）。"""
+    return ({r[2] for r in CTX.rows if r[2]},
+            {r[1] for r in CTX.rows if not r[2]})
 
 
 def is_done(p, marks):
-    barcodes, titles = marks
-    return p["title"] in titles or bool(p["barcode"] and p["barcode"] in barcodes)
+    barcodes, no_barcode_titles = marks
+    return (p["barcode"] in barcodes if p["barcode"]
+            else p["title"] in no_barcode_titles)
 
 
 def relocate(prod, nodes):
@@ -1191,7 +1452,8 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
                   verify, max_scrolls):
     """
     访问一个商品：点标题 → 等加载 → 滑 N 次 → 停留 → 返回。
-    verify=True 时额外 dump 一次校验字段并取值。
+    verify=True 时滚动过程中逐屏解析：渠道表格（状态/零售价/库存）和
+    『店内码/货号』依次经过屏幕，合并成详情字段。
     """
     load, pause, dwell, settle = pace
     t0 = time.time()
@@ -1202,11 +1464,17 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
     def skip(status, why):
         info(f"[{idx:>3}] ✗ {title}  ({time.time() - t0:.1f}s)  {why}")
         CTX.rows.append([idx, prod["title"], prod["barcode"], "", "",
-                         status, offset, datetime.now().strftime("%H:%M:%S")])
+                         status, offset, *capture_meta()])
         return time.time() - t0
 
     if not open_detail(prod, load):
         return skip("未打开", "详情页没打开，已跳过")
+
+    # verify 时详情页一打开就先解析一次顶部字段（开放平台标识 / SPU / SKU /
+    # 重量 / 采购价 / 渠道信息），带重试等渲染；滚动中的 dump 再把渠道表格补进来。
+    detail = {}
+    if verify:
+        detail = parse_detail_with_retry(lambda: dump_xml())
 
     # 平台限流：别在报错页上补滑（实测把它当成"未找到"滑了 7 次），
     # 退回列表、等一阵再重开，并给之后的每个商品加停留，把整体频率降下来。
@@ -1236,24 +1504,50 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
     for _ in range(n_scroll):
         human_swipe(x_mid, y_from, x_mid, y_to)
         nap(pause)
+        if verify:
+            # 刚打开时内容可能还没渲染出来（dump 只有标题）；渠道信息表格
+            # 会在滚动中依次经过屏幕，逐屏解析合并，不用回头补滑。
+            detail = parse_detail(parse_nodes(dump_xml()), detail)
 
     status, values = "未校验", []
     if verify and is_custom_product(prod):
         # 自建商品详情页没有『店内码/货号』这一行，不补滑，照常返回
         status = "自建商品"
     elif verify:
+        # 刚打开时内容可能还没渲染出来（dump 只有标题），所以每一屏滚动后
+        # 都解析一次合并：渠道信息表格和『店内码/货号』会依次经过屏幕。
         nodes = dump_nodes_undisturbed("详情页")
         found, values = find_target_field(nodes)
+        detail = parse_detail(nodes, detail)
         extra = 0
-        # 这个商品比标定样本长，补滑几次
-        while not found and extra < max(0, max_scrolls - n_scroll):
+        sig = None
+        # 渠道信息没看全或字段没找到就继续补滑；页面到底且再无新字段就提前停，
+        # 不为找不到的字段白滑。
+        while extra < max(0, max_scrolls - n_scroll):
+            if found and channels_complete(detail):
+                break
             human_swipe(x_mid, y_from, x_mid, y_to)
             extra += 1
             nap(pause)
-            found, values = find_target_field(dump_nodes_undisturbed("详情页"))
+            nodes = dump_nodes_undisturbed("详情页")
+            found2, values2 = find_target_field(nodes)
+            if found2:
+                found, values = True, values2
+            detail = parse_detail(nodes, detail)
+            if found and channels_complete(detail):
+                break
+            sig2 = tuple(sorted((n["text"] for n in nodes if n["text"]))[:80])
+            if sig2 == sig:
+                break   # 页面没动（已到底），再滑也出不来新字段
+            sig = sig2
         status = "成功" if found else "未找到"
         if extra:
             info(f"    （比标定多滑了 {extra} 次）")
+        # 顶部字段（SPU / 开放平台标识 / 渠道表格）可能整段没渲染出来：
+        # 滚回页顶补一次，补不到就留空
+        if "SPU" not in detail or not channels_complete(detail):
+            detail = parse_top_detail(detail)
+            info("    （回滚到页顶补了详情字段）")
 
     nap(dwell)
     if CTX.extra_pause:
@@ -1263,6 +1557,8 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
     nap(settle)
 
     code, artno = split_field_values(values)
+    if verify:
+        CTX.details[prod["title"]] = detail
     dt = time.time() - t0
     mark = {"成功": "✓", "未找到": "✗", "未打开": "✗", "限流": "✗",
             "自建商品": "○", "未校验": "·"}[status]
@@ -1273,8 +1569,7 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
          + (f"  {shown}" if shown else ""))
 
     CTX.rows.append([idx, prod["title"], prod["barcode"], code, artno,
-                     status, offset,
-                     datetime.now().strftime("%H:%M:%S")])
+                     status, offset, *capture_meta()])
     return dt
 
 
@@ -1460,9 +1755,10 @@ def main():
             info(f"第 1 个是自建商品，改用第 {cands[0] + 1} 个作标定样本")
 
         si, n_scroll, ok, vals, back = cands[0], 1, False, [], None
+        sample_detail = {}
         for si in cands[:2]:          # 最多换一次样本
             sample = products[si]
-            n_scroll, ok, vals, back = calibrate_detail_scrolls(
+            n_scroll, ok, vals, back, sample_detail = calibrate_detail_scrolls(
                 sample, sw, sh_, pace, args.max_scrolls)
             if ok:
                 break
@@ -1482,7 +1778,9 @@ def main():
             CTX.rows.append([len(CTX.rows) + 1, sample["title"], sample["barcode"],
                              cal_code, cal_artno,
                              "成功" if ok else "未找到", video_offset(),
-                             datetime.now().strftime("%H:%M:%S")])
+                             *capture_meta()])
+            if sample_detail:
+                CTX.details[sample["title"]] = sample_detail
         first_screen = list(products)
         marks = done_marks()
         products = [p for i, p in enumerate(products)
