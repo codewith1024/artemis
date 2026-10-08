@@ -211,6 +211,7 @@ PACING = {
     "fast":    ((0.7, 1.1), (0.25, 0.40), (0.4, 0.7), (0.5, 0.8)),
     "natural": ((1.2, 1.9), (0.45, 0.70), (1.4, 2.1), (0.8, 1.3)),
     "demo":    ((1.8, 2.6), (0.70, 1.00), (2.4, 3.2), (1.2, 1.8)),
+    "ultra":   ((0.45, 0.75), (0.12, 0.25), (0.25, 0.45), (0.3, 0.5)),
 }
 
 
@@ -1284,8 +1285,8 @@ def calibrate_detail_scrolls(prod, sw, sh_, pace, max_scrolls):
         found, values = find_target_field(nodes)
         detail = parse_detail(nodes, detail)
 
-    if "SPU" not in detail or not channels_complete(detail):
-        detail = parse_top_detail(detail)
+    if not channels_complete(detail):
+        detail = parse_top_detail(detail, up_swipes=n_scroll + 1)
 
     back = find_back_button(nodes, sw, sh_)
 
@@ -1307,7 +1308,8 @@ def calibrate_detail_scrolls(prod, sw, sh_, pace, max_scrolls):
 def parse_detail_with_retry(nodes_fn, detail=None, tries=3, wait=0.7):
     """
     解析详情页字段，带重试：详情页刚打开时内容可能还没渲染出来（dump 只有
-    标题栏），等一拍重抓，最多 tries 次。已解析进 detail 的字段不丢。
+    标题栏），等一拍重抓，最多 tries 次。表格被屏幕下沿裁掉时重抓没用
+    （裁掉的部分不在层级里），交给滚动中或页顶补采。
     """
     for attempt in range(tries):
         detail = parse_detail(parse_nodes(nodes_fn()), detail)
@@ -1317,12 +1319,13 @@ def parse_detail_with_retry(nodes_fn, detail=None, tries=3, wait=0.7):
     return detail
 
 
-def parse_top_detail(detail=None, tries=3):
-    """滚回详情页顶部，把顶部字段（开放平台标识 / SPU / 渠道信息）补齐一次。"""
-    x1, y1, y2 = 540, 300, 1700
-    for _ in range(6):
-        human_swipe(x1, y1, x1, y2, (300, 400))
-        time.sleep(0.5)
+def parse_top_detail(detail=None, up_swipes=3, tries=3):
+    """滚回详情页顶部，把顶部字段（渠道表格）补齐一次。up_swipes 按滚下去的
+    次数给（每次上滑距离和下滑一样），不用固定滑 6 次。"""
+    x, y_from, y_to = 540, 300, 1700
+    for _ in range(up_swipes):
+        human_swipe(x, y_from, x, y_to, (300, 400))
+        time.sleep(0.4)
     return parse_detail_with_retry(lambda: dump_xml(), detail, tries=tries)
 
 
@@ -1504,9 +1507,10 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
     for _ in range(n_scroll):
         human_swipe(x_mid, y_from, x_mid, y_to)
         nap(pause)
-        if verify:
-            # 刚打开时内容可能还没渲染出来（dump 只有标题）；渠道信息表格
-            # 会在滚动中依次经过屏幕，逐屏解析合并，不用回头补滑。
+        if verify and not channels_complete(detail):
+            # 渠道表格会在滚动中依次经过屏幕；等一拍再 dump（ultra 档停顿
+            # 短，立刻 dump 抓到的可能是过渡状态），看全后不再逐屏 dump
+            time.sleep(0.35)
             detail = parse_detail(parse_nodes(dump_xml()), detail)
 
     status, values = "未校验", []
@@ -1520,12 +1524,9 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
         found, values = find_target_field(nodes)
         detail = parse_detail(nodes, detail)
         extra = 0
-        sig = None
-        # 渠道信息没看全或字段没找到就继续补滑；页面到底且再无新字段就提前停，
-        # 不为找不到的字段白滑。
-        while extra < max(0, max_scrolls - n_scroll):
-            if found and channels_complete(detail):
-                break
+        # 补滑只为『店内码/货号』没找到的商品（页面比标定样本长）；渠道表格
+        # 在上方，往下多滑永远看不到，缺失时在找到后滚回页顶补一次。
+        while not found and extra < max(0, max_scrolls - n_scroll):
             human_swipe(x_mid, y_from, x_mid, y_to)
             extra += 1
             nap(pause)
@@ -1534,20 +1535,16 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
             if found2:
                 found, values = True, values2
             detail = parse_detail(nodes, detail)
-            if found and channels_complete(detail):
+            if found:
                 break
-            sig2 = tuple(sorted((n["text"] for n in nodes if n["text"]))[:80])
-            if sig2 == sig:
-                break   # 页面没动（已到底），再滑也出不来新字段
-            sig = sig2
         status = "成功" if found else "未找到"
         if extra:
             info(f"    （比标定多滑了 {extra} 次）")
-        # 顶部字段（SPU / 开放平台标识 / 渠道表格）可能整段没渲染出来：
-        # 滚回页顶补一次，补不到就留空
-        if "SPU" not in detail or not channels_complete(detail):
-            detail = parse_top_detail(detail)
-            info("    （回滚到页顶补了详情字段）")
+        # 顶部字段（渠道表格）没看全时滚回页顶补一次，补不到就留空；
+        # 上滑次数按滚下去的量给，不用固定滑 6 次
+        if not channels_complete(detail):
+            detail = parse_top_detail(detail, up_swipes=n_scroll + 1)
+            info("    （回滚到页顶补了渠道信息）")
 
     nap(dwell)
     if CTX.extra_pause:
