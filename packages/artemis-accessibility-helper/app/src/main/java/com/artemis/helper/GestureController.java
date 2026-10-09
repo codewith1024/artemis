@@ -5,6 +5,7 @@ import android.accessibilityservice.GestureDescription;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.graphics.Rect;
 import android.graphics.Path;
 import android.os.Build;
 import android.os.Bundle;
@@ -109,6 +110,59 @@ public final class GestureController {
 
     public static boolean clearText(AccessibilityService service) {
         return setText(service, "");
+    }
+
+    /**
+     * Performs ACTION_SCROLL_FORWARD/BACKWARD on the deepest scrollable node under (x,y).
+     * Unlike a timed swipe this returns immediately after the app accepts the semantic action,
+     * has no fling inertia, and scrolls by the widget's own page amount.
+     */
+    public static boolean scrollAt(
+            AccessibilityService service, float x, float y, boolean forward) {
+        AccessibilityNodeInfo root = null;
+        AccessibilityNodeInfo target = null;
+        try {
+            root = service.getRootInActiveWindow();
+            if (root == null) return false;
+            target = findScrollableAt(root, (int) x, (int) y);
+            if (target == null) return false;
+            int action = forward
+                    ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+            return target.performAction(action);
+        } catch (Throwable t) {
+            Log.w(TAG, "scrollAt failed", t);
+            return false;
+        } finally {
+            HierarchyDumper.safeRecycle(target);
+            HierarchyDumper.safeRecycle(root);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static AccessibilityNodeInfo findScrollableAt(
+            AccessibilityNodeInfo node, int x, int y) {
+        if (node == null) return null;
+        Rect bounds = new Rect();
+        try { node.getBoundsInScreen(bounds); } catch (Throwable ignored) {}
+        if (!bounds.isEmpty() && !bounds.contains(x, y)) return null;
+
+        int count = node.getChildCount();
+        for (int i = 0; i < count; i++) {
+            AccessibilityNodeInfo child = null;
+            try {
+                child = node.getChild(i);
+                AccessibilityNodeInfo found = findScrollableAt(child, x, y);
+                if (found != null) return found;
+            } catch (Throwable ignored) {
+            } finally {
+                HierarchyDumper.safeRecycle(child);
+            }
+        }
+        try {
+            if (node.isScrollable()) return AccessibilityNodeInfo.obtain(node);
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     public static boolean performGlobalAction(AccessibilityService service, String actionName) {

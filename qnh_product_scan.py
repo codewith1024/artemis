@@ -64,6 +64,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -103,7 +104,7 @@ class DumpState:
 TARGET_FIELD_PAT = re.compile(r"店内码|货号")
 
 # 字段值同行里的操作按钮，不是值本身
-ROW_NOISE = {"复制", "修改", "编辑", "查看", "改价"}
+ROW_NOISE = {"复制", "复制全部", "修改", "编辑", "查看", "改价"}
 
 # 字段值列相对标签右边缘的起笔容差（像素）
 VALUE_COL_SLACK = 80
@@ -568,12 +569,23 @@ def blocking_dialog(nodes):
     return min(body, key=lambda n: n["y1"])["text"] if body else "店铺弹窗"
 
 
+def current_blocking_dialog():
+    """优先用 Helper v9 系统文字索引；再退到 v8 遍历 / 完整层级。"""
+    match = helper_find_any_text(["我知道了", "订单号", "顾客修改"])
+    if match is not None:
+        return match or None
+    match = helper_find_text(BLOCKING_DIALOG_PAT.pattern)
+    if match is not None:
+        return match or None
+    return blocking_dialog(parse_nodes(dump_xml()))
+
+
 def wait_while_dialog(where):
     """
     有店铺弹窗就原地等店员处理，绝不替人点掉或按返回。
     返回 True 表示等过一次（调用方应重新确认页面状态）。
     """
-    d = blocking_dialog(parse_nodes(dump_xml()))
+    d = current_blocking_dialog()
     if not d:
         return False
     warn(f"\a检测到店铺弹窗「{d}」（{where}）——已暂停，不会点它。"
@@ -581,7 +593,7 @@ def wait_while_dialog(where):
     t0 = time.time()
     while not CTX.interrupted:
         time.sleep(DIALOG_POLL)
-        if not blocking_dialog(parse_nodes(dump_xml())):
+        if not current_blocking_dialog():
             info(f"弹窗已关闭（等了 {time.time() - t0:.0f} 秒），继续")
             time.sleep(0.8)
             return True
@@ -817,9 +829,18 @@ def parse_detail(nodes, detail=None):
 
 
 def channels_complete(detail):
-    """三个渠道的零售价和库存都见过；缺一个就值得滚回页顶补一次。"""
-    return all(c + "零售价" in detail and c + "库存" in detail
-               for c in CHANNEL_SECTION_ORDER)
+    """
+    三个渠道信息是否完整：已上架必须有零售价和库存；未上线/已下架合法地没有
+    价格和库存，看到状态标题即算完整。
+    """
+    for c in CHANNEL_SECTION_ORDER:
+        status = detail.get(c + "状态")
+        if not status:
+            return False
+        if status == "已上架" and not (detail.get(c + "零售价")
+                                     and detail.get(c + "库存")):
+            return False
+    return True
 
 
 def detail_cols(title):
@@ -846,6 +867,9 @@ HELPER_TOKEN_ACTION = f"{HELPER_PKG}.SET_TOKEN"
 # 从这个版本起助手每次 dump 都读当前屏幕（旧版读的是不会失效的节点缓存，
 # 在本 App 上滚动 / 页面切换后返回过期层级）。更早的版本只用它做手势。
 HELPER_FRESH_DUMP_VERSION = 7
+HELPER_TEXT_QUERY_VERSION = 8
+HELPER_ANY_TEXT_QUERY_VERSION = 9
+HELPER_SEMANTIC_SCROLL_VERSION = 10
 
 
 class HelperState:
@@ -859,6 +883,10 @@ class HelperState:
     use_for_dump = False
     allow_dump = True
     action_failures = 0
+    version = 0
+    has_text_query = False
+    has_any_text_query = False
+    has_semantic_scroll = False
 
 
 def _helper_http(path, payload=None, timeout=10.0):
@@ -913,6 +941,10 @@ def helper_setup():
 
     HelperState.ready = True
     version = pong.get("version_code") or 0
+    HelperState.version = version
+    HelperState.has_text_query = version >= HELPER_TEXT_QUERY_VERSION
+    HelperState.has_any_text_query = version >= HELPER_ANY_TEXT_QUERY_VERSION
+    HelperState.has_semantic_scroll = version >= HELPER_SEMANTIC_SCROLL_VERSION
     HelperState.use_for_dump = (HelperState.allow_dump
                                 and version >= HELPER_FRESH_DUMP_VERSION)
     if HelperState.use_for_dump:
@@ -923,8 +955,16 @@ def helper_setup():
                  "`uv run artemis helper install` 可升级）")
     else:
         where = "，UI 层级仍用 uiautomator（--no-helper-dump）"
+    fast_parts = []
+    if HelperState.has_any_text_query:
+        fast_parts.append("弹窗检查走系统文字索引")
+    elif HelperState.has_text_query:
+        fast_parts.append("弹窗检查走轻量遍历")
+    if HelperState.has_semantic_scroll:
+        fast_parts.append("列表语义翻页")
+    fast = "；" + "，".join(fast_parts) if fast_parts else ""
     info(f"已接入 ARTEMIS 助手 v{version}（127.0.0.1:{HelperState.port}）："
-         f"点击 / 滑动 / 返回走助手{where}")
+         f"点击 / 滑动 / 返回走助手{where}{fast}")
     return True
 
 
@@ -932,6 +972,42 @@ def helper_dump():
     """通过助手取一次层级（标准 UIAutomator XML）。失败返回 None。"""
     xml = _helper_http("/dump_xml")
     return xml if xml and xml.strip().startswith("<?xml") else None
+
+
+def helper_find_any_text(texts):
+    """v9+ 系统侧字面检索；返回匹配文字、空串（未找到）或 None（不可用）。"""
+    if not (HelperState.ready and HelperState.has_any_text_query):
+        return None
+    joined = "\x1f".join(texts)
+    path = "/has_any_text?texts=" + urllib.parse.quote(joined, safe="")
+    raw = _helper_http(path, timeout=2.0)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not data.get("success"):
+        return None
+    return data.get("match", "") if data.get("found") else ""
+
+
+def helper_find_text(pattern):
+    """v8+ 设备端早停正则查询；返回匹配文字、空串（未找到）或 None（不可用）。"""
+    if not (HelperState.ready and HelperState.has_text_query):
+        return None
+    path = "/has_text?pattern=" + urllib.parse.quote(pattern, safe="")
+    raw = _helper_http(path, timeout=3.0)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not data.get("success"):
+        return None
+    return data.get("match", "") if data.get("found") else ""
+
 
 
 def helper_action(cmd, **params):
@@ -1504,10 +1580,13 @@ def wait_list_after_scroll(sw, sh_, retries=5):
     因此把 App 退到桌面）。返回 (nodes, products)，实在等不到才返回空。
     """
     last_nodes = []
+    t0 = time.time()
     for attempt in range(retries):
         nodes, products = dump_products()
         last_nodes = nodes
         if products:
+            if attempt:
+                info(f"    （列表渲染等待 {time.time() - t0:.1f}s / {attempt} 次）")
             return nodes, products
         if blocking_dialog(nodes):
             wait_while_dialog("翻列表时")
@@ -1567,8 +1646,26 @@ def open_detail(prod, load, tries=2):
         t0 = time.time()
         pace_target = random.uniform(*load)
         human_tap(*prod["tap"], box=prod["box"])
-        time.sleep(0.3)
+        time.sleep(0.15 if HelperState.has_any_text_query else 0.3)
+        fast_check = HelperState.has_any_text_query
         while time.time() - t0 < DETAIL_OPEN_TIMEOUT:
+            if fast_check:
+                match = helper_find_any_text(
+                    ["我知道了", "订单号", "顾客修改", "商品详情"])
+                if match is None:
+                    fast_check = False
+                    continue
+                if match and BLOCKING_DIALOG_PAT.search(match):
+                    wait_while_dialog("等详情页时")
+                elif match == "商品详情":
+                    time.sleep(max(0.0, pace_target - (time.time() - t0)))
+                    fresh_nodes = parse_nodes(dump_xml())
+                    if is_detail_page(fresh_nodes):
+                        CTX.last_detail_nodes = fresh_nodes
+                        return True
+                time.sleep(0.08)
+                continue
+
             nodes = parse_nodes(dump_xml())
             if is_detail_page(nodes):
                 # 页面出来了，但仍按原来的节奏停够再抓一份新鲜层级，给内容渲染时间
@@ -1596,6 +1693,49 @@ def open_detail(prod, load, tries=2):
     return False
 
 
+def tall_detail_ready(detail):
+    """高屏详情核心是否齐全；重量/采购价等字段允许业务上为空。"""
+    core = ("开放平台标识", "SPU", "SKU", "采购单位_详情",
+            "美团闪购状态", "饿了么状态", "京东到家状态")
+    return channels_complete(detail) and all(detail.get(k) for k in core)
+
+
+def collect_tall_detail(prod, nodes, sw, sh_, timeout=2.8):
+    """
+    高屏专用：原地轮询同一整页，合并详情字段。核心字段和（标品的）店内码/
+    货号齐全立即返回；超长页的 Other Information 只补一次小滑。
+    """
+    detail, found, values = {}, False, []
+    deadline = time.time() + timeout
+    while True:
+        if blocking_dialog(nodes):
+            wait_while_dialog("读取详情时")
+            nodes = dump_nodes_undisturbed("详情页")
+        detail = parse_detail(nodes, detail)
+        found2, values2 = find_target_field(nodes)
+        if found2:
+            found, values = True, values2
+        target_ready = found or is_custom_product(prod)
+        if tall_detail_ready(detail) and target_ready:
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.18)
+        nodes = dump_nodes_undisturbed("详情页")
+
+    if any(not detail.get(k) for k in LOWER_DETAIL_COLUMNS):
+        human_swipe(sw // 2, int(sh_ * 0.72), sw // 2, int(sh_ * 0.50),
+                    (500, 650))
+        time.sleep(0.3)
+        lower_nodes = dump_nodes_undisturbed("详情页下方")
+        detail = parse_detail(lower_nodes, detail)
+        found2, values2 = find_target_field(lower_nodes)
+        if found2:
+            found, values = True, values2
+        nodes = lower_nodes
+    return detail, found, values, nodes
+
+
 def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
                   verify, max_scrolls):
     """
@@ -1618,18 +1758,8 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
     if not open_detail(prod, load):
         return skip("未打开", "详情页没打开，已跳过")
 
-    # verify 时详情页一打开就先解析一次；整页一屏可见（虚拟加高屏幕）时，
-    # 渠道表格没看全多半只是渲染慢，等一拍重抓直到看全。
     detail = {}
     nodes = CTX.last_detail_nodes or parse_nodes(dump_xml())
-    if verify:
-        detail = parse_detail(nodes)
-        if sh_ >= 3500 and not channels_complete(detail):
-            # 高屏整页可见；字段没看全只是 React Native 渲染慢，原地等完整，
-            # 自建商品也一样（否则太早返回，导航栈尚未稳定，返回键会被吞）
-            detail = parse_detail_with_retry(
-                lambda: dump_xml(), detail, tries=4, wait=0.45,
-                need=channels_complete)
 
     # 平台限流：复用 open_detail 的层级，正常路径不再多 dump 一次；
     # 退回列表、等一阵再重开，并给之后的每个商品加停留。
@@ -1657,6 +1787,39 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
         current_nodes = CTX.last_detail_nodes or parse_nodes(dump_xml())
         detail = parse_detail(current_nodes) if verify else {}
 
+    # 高屏快路径：一套就绪循环拿齐整页字段，不进入下面普通屏的多轮 dump/补滑。
+    if verify and sh_ >= 3500:
+        detail, found, values, current_nodes = collect_tall_detail(
+            prod, current_nodes, sw, sh_)
+        complete = (tall_detail_ready(detail)
+                    and all(detail.get(k) for k in LOWER_DETAIL_COLUMNS))
+        if not complete:
+            status = "详情不全"
+        elif is_custom_product(prod):
+            status = "自建商品"
+        else:
+            status = "成功" if found else "未找到"
+        code, artno = split_field_values(values)
+        CTX.details[prod["title"]] = detail
+        if CTX.extra_pause:
+            time.sleep(CTX.extra_pause)
+        wait_while_dialog("返回前")
+        tap_back(back)
+        time.sleep(random.uniform(0.45, 0.65))
+        dt = time.time() - t0
+        mark = {"成功": "✓", "未找到": "✗", "详情不全": "✗",
+                "自建商品": "○"}[status]
+        shown = "  ".join(filter(None, [f"店内码={code}" if code else "",
+                                        f"货号={artno}" if artno else ""]))
+        info(f"[{idx:>3}] {mark} {title}  ({dt:.1f}s)"
+             + (f"  {shown}" if shown else ""))
+        CTX.rows.append([idx, prod["title"], prod["barcode"], code, artno,
+                         status, offset, *capture_meta()])
+        return dt
+
+    # 普通屏路径：按标定次数滚动，逐屏合并字段。
+    if verify:
+        detail = parse_detail(current_nodes, detail)
     x_mid = sw // 2
     y_from, y_to = int(sh_ * 0.72), int(sh_ * 0.30)
     for _ in range(n_scroll):
@@ -1762,6 +1925,12 @@ def scroll_list(sw, sh_, pace, anchor=None):
     内容移动 ≈ 手指移动（600→593~597，900→890），可以精确控制。
     """
     x = int(sw * 0.65)
+    if sh_ >= 3500 and HelperState.has_semantic_scroll:
+        if helper_action("scroll_at", x=x, y=int(sh_ * 0.55), direction="forward"):
+            time.sleep(0.8)
+            return
+        # FlatList 在分页懒加载边界可能暂时拒绝 ACTION_SCROLL_FORWARD；
+        # 自动退回下方的手势，不影响连续性。
     if anchor is not None:
         d = anchor["box"][1] - int(sh_ * LIST_TOP_Y)
     else:
@@ -2058,35 +2227,53 @@ def main():
                 info(f"— 翻页，本屏新增 {len(products)} 个商品 —")
                 continue
 
-            # 点之前先看一眼当前画面：有店铺弹窗就等（盲点的坐标可能正落在
-            # 弹窗的「修改详情」上）；没有就按当前画面重新定位这个商品。翻页时
-            # 记下的坐标要等上一个商品看完回来才用，列表位置稍有变化就会点空。
-            nodes = parse_nodes(dump_xml())
-            if blocking_dialog(nodes):
-                wait_while_dialog("点商品前")
+            # 高屏 + Helper v8：设备端早停查询只检查「订单弹窗 / 仍在详情页」，
+            # 正常列表路径直接复用本屏已标定坐标，不再为每个商品序列化整棵 XML。
+            fast_safe = False
+            if sh_ >= 3500 and (HelperState.has_any_text_query
+                                or HelperState.has_text_query):
+                guard = helper_find_any_text(
+                    ["我知道了", "订单号", "顾客修改", "商品详情"])
+                if guard is None:
+                    guard_pattern = "(?:" + BLOCKING_DIALOG_PAT.pattern + ")|^商品详情$"
+                    guard = helper_find_text(guard_pattern)
+                if guard is not None:
+                    if guard and BLOCKING_DIALOG_PAT.search(guard):
+                        wait_while_dialog("点商品前")
+                    elif guard == "商品详情":
+                        tap_back(back)
+                        time.sleep(0.7)
+                    else:
+                        fast_safe = True
+
+            if fast_safe:
+                target = products[cursor]
+            else:
+                # 普通屏 / 助手降级 / 异常恢复：完整层级重新定位坐标。
                 nodes = parse_nodes(dump_xml())
-            on_screen = find_products(nodes, detect_watermarks(nodes))
-            if not on_screen:
-                # 返回动画尚未结束就等；若确实还在详情页，只补一次明确的返回。
-                # 不调用会盲按多次返回的 ensure_list_page。
-                if is_detail_page(nodes):
-                    tap_back(back)
-                    time.sleep(0.7)
-                _, on_screen = wait_list_after_scroll(sw, sh_, retries=4)
+                if blocking_dialog(nodes):
+                    wait_while_dialog("点商品前")
+                    nodes = parse_nodes(dump_xml())
+                on_screen = find_products(nodes, detect_watermarks(nodes))
                 if not on_screen:
-                    stop_reason = ("点下一个商品前无法读到列表，已安全停止；"
-                                   "不会继续按返回退出 App，可用 --resume 续跑。")
-                    warn(stop_reason)
-                    break
-            screen_last = on_screen[-1]
-            target = next((p for p in on_screen
-                           if same_product(p, products[cursor])), None)
-            if target is None:
-                # 目标已不在当前屏：改用屏上还没处理过的商品；没有就翻页
-                marks = done_marks()
-                products = [p for p in on_screen if not is_done(p, marks)]
-                cursor = 0
-                continue
+                    if is_detail_page(nodes):
+                        tap_back(back)
+                        time.sleep(0.7)
+                    _, on_screen = wait_list_after_scroll(sw, sh_, retries=4)
+                    if not on_screen:
+                        stop_reason = ("点下一个商品前无法读到列表，已安全停止；"
+                                       "不会继续按返回退出 App，可用 --resume 续跑。")
+                        warn(stop_reason)
+                        break
+                screen_last = on_screen[-1]
+                target = next((p for p in on_screen
+                               if same_product(p, products[cursor])), None)
+                if target is None:
+                    # 目标已不在当前屏：改用屏上还没处理过的商品；没有就翻页
+                    marks = done_marks()
+                    products = [p for p in on_screen if not is_done(p, marks)]
+                    cursor = 0
+                    continue
 
             done += 1
             verify = (args.verify_every > 0 and
@@ -2111,11 +2298,13 @@ def main():
                  + (f"。原因：{stop_reason}" if stop_reason else ""))
         okn = sum(1 for r in CTX.rows if r[5] == "成功")
         bad = sum(1 for r in CTX.rows if r[5] == "未找到")
+        thin = sum(1 for r in CTX.rows if r[5] == "详情不全")
         cus = sum(1 for r in CTX.rows if r[5] == "自建商品")
         nop = sum(1 for r in CTX.rows if r[5] == "未打开")
         thr = sum(1 for r in CTX.rows if r[5] == "限流")
-        info(f"校验：成功 {okn}，未找到 {bad}，自建商品 {cus}（无此字段），"
-             f"未打开 {nop}，限流 {thr}，未校验 {n - okn - bad - cus - nop - thr}")
+        info(f"校验：成功 {okn}，未找到 {bad}，详情不全 {thin}，"
+             f"自建商品 {cus}，未打开 {nop}，限流 {thr}，"
+             f"未校验 {n - okn - bad - thin - cus - nop - thr}")
         if CTX.throttle_hits:
             warn(f"本轮撞平台限流 {CTX.throttle_hits} 次（接口 429）。频繁触发可能影响账号，"
                  "建议放慢节奏（--pace natural）或拆成几段错开时间跑。")

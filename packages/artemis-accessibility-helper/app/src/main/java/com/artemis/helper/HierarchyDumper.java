@@ -29,6 +29,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
  * Universal, ultra-stable UI hierarchy dumper for Android (API 24 - 37+).
@@ -110,6 +112,182 @@ public final class HierarchyDumper {
         boolean truncated = false;
         /** True when the node cache could not be dropped, so every node is refreshed as it is read. */
         boolean refreshNodes = false;
+    }
+
+    public static JSONObject findAnyText(AccessibilityService service, String textsValue) {
+        long startTime = System.currentTimeMillis();
+        JSONObject result = new JSONObject();
+        try {
+            if (textsValue == null || textsValue.isEmpty() || textsValue.length() > 1024) {
+                result.put("success", false);
+                result.put("error", "texts must contain 1-1024 characters");
+                return result;
+            }
+            String[] needles = textsValue.split("\\u001f", -1);
+            List<RawRootEntry> roots = getActiveRawRoots(service);
+            boolean found = false;
+            String matched = "";
+            int resultNodes = 0;
+            try {
+                outer:
+                for (RawRootEntry entry : roots) {
+                    for (String needle : needles) {
+                        if (needle.isEmpty()) continue;
+                        List<AccessibilityNodeInfo> hits = null;
+                        try {
+                            // This framework query executes in the accessibility interaction
+                            // connection and returns only matches; unlike dump(), it does not
+                            // walk/read/serialize every node on the host side.
+                            hits = entry.root.findAccessibilityNodeInfosByText(needle);
+                            if (hits == null) continue;
+                            resultNodes += hits.size();
+                            for (AccessibilityNodeInfo hit : hits) {
+                                if (hit == null) continue;
+                                boolean visible = true;
+                                try { visible = hit.isVisibleToUser(); } catch (Throwable ignored) {}
+                                if (!visible) continue;
+                                CharSequence text = hit.getText();
+                                CharSequence desc = hit.getContentDescription();
+                                String t = text == null ? "" : text.toString();
+                                String d = desc == null ? "" : desc.toString();
+                                if (t.contains(needle) || d.contains(needle)) {
+                                    matched = !t.isEmpty() ? t : d;
+                                    found = true;
+                                    break outer;
+                                }
+                            }
+                        } finally {
+                            if (hits != null) {
+                                for (AccessibilityNodeInfo hit : hits) safeRecycle(hit);
+                            }
+                        }
+                    }
+                }
+            } finally {
+                for (RawRootEntry entry : roots) safeRecycle(entry.root);
+            }
+            result.put("success", true);
+            result.put("found", found);
+            result.put("match", matched);
+            result.put("result_node_count", resultNodes);
+            result.put("elapsed_ms", System.currentTimeMillis() - startTime);
+            if (service instanceof ArtemisAccessibilityService) {
+                ArtemisAccessibilityService s = (ArtemisAccessibilityService) service;
+                result.put("package", s.getCurrentPackageName());
+                result.put("activity", s.getCurrentActivityName());
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "findAnyText failed", t);
+            try {
+                result.put("success", false);
+                result.put("error", "findAnyText failed: " + t.getMessage());
+            } catch (Throwable ignored) {}
+        }
+        return result;
+    }
+
+    public static JSONObject findText(AccessibilityService service, String patternText) {
+        long startTime = System.currentTimeMillis();
+        JSONObject result = new JSONObject();
+        try {
+            if (patternText == null || patternText.isEmpty() || patternText.length() > 512) {
+                result.put("success", false);
+                result.put("error", "pattern must contain 1-512 characters");
+                return result;
+            }
+            final Pattern pattern;
+            try {
+                pattern = Pattern.compile(patternText);
+            } catch (PatternSyntaxException e) {
+                result.put("success", false);
+                result.put("error", "invalid regex: " + e.getMessage());
+                return result;
+            }
+
+            boolean refresh = !dropNodeCache(service);
+            List<RawRootEntry> roots = getActiveRawRoots(service);
+            int[] visited = new int[]{0};
+            String[] matched = new String[]{""};
+            boolean found = false;
+            int stoppedAt = roots.size() - 1;
+            for (int i = 0; i < roots.size(); i++) {
+                RawRootEntry entry = roots.get(i);
+                try {
+                    if (findTextInNode(entry.root, 0, pattern, refresh, visited, matched)) {
+                        found = true;
+                        stoppedAt = i;
+                        break;
+                    }
+                } finally {
+                    safeRecycle(entry.root);
+                }
+            }
+            // An early match leaves later roots unvisited; recycle their owned root objects.
+            if (found) {
+                for (int i = stoppedAt + 1; i < roots.size(); i++) {
+                    safeRecycle(roots.get(i).root);
+                }
+            }
+
+            result.put("success", true);
+            result.put("found", found);
+            result.put("match", matched[0]);
+            result.put("node_count", visited[0]);
+            result.put("elapsed_ms", System.currentTimeMillis() - startTime);
+            if (service instanceof ArtemisAccessibilityService) {
+                ArtemisAccessibilityService s = (ArtemisAccessibilityService) service;
+                result.put("package", s.getCurrentPackageName());
+                result.put("activity", s.getCurrentActivityName());
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "findText failed", t);
+            try {
+                result.put("success", false);
+                result.put("error", "findText failed: " + t.getMessage());
+            } catch (Throwable ignored) {}
+        }
+        return result;
+    }
+
+    private static boolean findTextInNode(
+            AccessibilityNodeInfo node,
+            int depth,
+            Pattern pattern,
+            boolean refresh,
+            int[] visited,
+            String[] matched
+    ) {
+        if (node == null || depth > MAX_DEPTH || visited[0] >= MAX_NODES) return false;
+        if (!freshen(node, refresh)) return false;
+        boolean visible = true;
+        try { visible = node.isVisibleToUser(); } catch (Throwable ignored) {}
+        if (!visible && depth > 0) return false;
+        visited[0]++;
+        try {
+            CharSequence text = node.getText();
+            CharSequence desc = node.getContentDescription();
+            String t = text == null ? "" : text.toString();
+            String d = desc == null ? "" : desc.toString();
+            if ((!t.isEmpty() && pattern.matcher(t).find())
+                    || (!d.isEmpty() && pattern.matcher(d).find())) {
+                matched[0] = !t.isEmpty() ? t : d;
+                return true;
+            }
+            int count = node.getChildCount();
+            for (int i = 0; i < count; i++) {
+                AccessibilityNodeInfo child = null;
+                try {
+                    child = childOf(node, i);
+                    if (child != null && findTextInNode(
+                            child, depth + 1, pattern, refresh, visited, matched)) {
+                        return true;
+                    }
+                } finally {
+                    safeRecycle(child);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     public static JSONObject dump(AccessibilityService service) {
