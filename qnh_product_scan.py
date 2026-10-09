@@ -5,18 +5,19 @@
 
 设计目标
 --------
-把"点商品 → 等详情页 → 滚动到「店内码/货号」→ 返回"这套确定性流程
-从 ~2 分钟/商品 压到 ~7-9 秒/商品。
+把"点商品 → 等详情页 → 读完整详情 → 返回"这套确定性流程从 ~2 分钟/商品
+压到普通屏约 7-9 秒；`--tall-screen --pace ultra` 下详情整页一屏可见，
+实测约 2-8 秒/商品（取决于 React Native 渲染和商品类型）。
 
-核心策略（一次标定 + 纯触摸循环）
---------------------------------
-1. 标定阶段：对列表页做一次 uiautomator dump，用「规格/条码」锚点算出
-   每个商品标题的点击坐标；再在第一个商品上实测"滚动几次能让
-   『店内码/货号』出现"，把这个次数 N 记下来。
-2. 主循环：只注入触摸，不做多余的层级读取。只有在翻列表页（布局变了，
-   坐标必须重算）和抽检校验时才读层级。
-3. 所有点击坐标带随机抖动、滑动轨迹带横向漂移、各段延时随机化，
-   避免"每次像素级完全一致"这种最容易被识别的机器特征。
+核心策略
+--------
+1. 列表页用「规格/条码」锚点定位商品卡片，同时读取规格、月售、库存、
+   活动品、三渠道零售价和采购价。
+2. 详情页读取开放平台 ID、SPU/SKU、重量、采购价/单位、三渠道状态/零售价/
+   库存、礼袋、可售日期、力荐、标品、店内码/货号；普通屏按样本标定滚动，
+   高屏整页一次读取。
+3. 翻页保留重叠卡片并对 React Native 虚拟列表显式等待；点击和滑动带轻微
+   随机化，平台 429 时自动退避。
 
 加速后端（可选）
 ----------------
@@ -43,13 +44,15 @@ python3（标准库即可，无第三方包）、adb、scrcpy（录制时才需�
   # 正式跑 20 个商品并录像
   python3 qnh_product_scan.py --count 20 --record
 
-  # 跑全部并对每个商品都做字段校验（会慢一些，但产出完整 CSV）
-  python3 qnh_product_scan.py --count 168 --record --verify-every 1
+  # 跑当前列表全部商品并采完整字段；高屏会自动设置且结束自动还原
+  python3 qnh_product_scan.py --count 0 --verify-every 1 --tall-screen --pace ultra --record
 
-按 Ctrl-C 可随时中断，脚本会妥善收尾（停止录制并保证 mp4 可播放）。
+按 Ctrl-C 可随时中断，脚本会妥善收尾（保存 CSV、停止录像、还原屏幕）；
+`--resume 上一轮.csv` 可续跑。
 """
 
 import argparse
+import atexit
 import csv
 import json
 import os
@@ -105,9 +108,11 @@ ROW_NOISE = {"复制", "修改", "编辑", "查看", "改价"}
 # 字段值列相对标签右边缘的起笔容差（像素）
 VALUE_COL_SLACK = 80
 
-# 翻列表：慢速滑动的手指速度（px/ms）、列表可见区顶部（占屏高，分类标题
-# 「薯片薯条（163）」下面）、单次最少滑动距离（px，防止锚点已在顶部时原地不动）
+# 翻列表：普通屏慢速滑动防惯性；虚拟高屏按逻辑像素折半显示在物理屏上，
+# 用更高逻辑速度等价于同样的物理速度，否则一次翻页要 8 秒。
 SCROLL_SPEED = 0.38
+TALL_SCROLL_SPEED = 0.95
+TALL_SCROLL_MAX = 1800
 LIST_TOP_Y = 0.167
 SCROLL_MIN = 500
 
@@ -158,7 +163,11 @@ DETAIL_COLUMNS = ["开放平台标识", "SPU", "SKU", "重量", "采购价_详�
                   "美团闪购状态", "美团闪购零售价", "美团闪购库存",
                   "饿了么状态", "饿了么零售价", "饿了么库存",
                   "京东到家状态", "京东到家零售价", "京东到家库存",
-                  "卖点", "可售日期", "礼袋"]
+                  "卖点", "可售日期", "礼袋", "是否力荐", "是否标品"]
+LOWER_DETAIL_COLUMNS = ("可售日期", "礼袋", "是否力荐", "是否标品")
+# 「其他信息」区块的标签 → CSV 列名；值是标签右侧同行节点（如「礼袋绑定 0个礼袋」）
+OTHER_INFO_LABELS = {"礼袋绑定": "礼袋", "可售日期": "可售日期",
+                     "是否力荐": "是否力荐", "是否标品": "是否标品"}
 CHANNEL_SECTION_ORDER = ["美团闪购", "饿了么", "京东到家"]
 OPEN_PLATFORM_PAT = re.compile(r"^开放平台标识[:：]\s*(\S+)")
 SPU_PAT = re.compile(r"^SPU[:：]\s*(\S+)")
@@ -235,6 +244,8 @@ class Ctx:
     resumed_cards = {}  # 续跑：标题 → 上一轮 CSV 里的卡片列
     details = {}        # 标题 → 详情页字段（verify 时解析），见 parse_detail
     resumed_details = {}  # 续跑：标题 → 上一轮 CSV 里的详情列
+    last_detail_nodes = []  # open_detail 最后一次确认过的详情页节点，避免调用方重复 dump
+    display_backup = None   # --tall-screen 前的 (size_override, density_override, effective_density)
 
 
 CTX = Ctx()
@@ -289,6 +300,48 @@ def screen_size():
     if not m:
         die(f"无法获取屏幕分辨率，wm size 返回：{out.strip()}")
     return int(m.group(1)), int(m.group(2))
+
+
+def setup_tall_screen():
+    """把逻辑屏幕临时改成双高；备份原 override，进程退出时保证还原。"""
+    size_out, density_out = sh("wm size"), sh("wm density")
+    sm = re.search(r"Override size:\s*(\d+x\d+)", size_out)
+    dm = re.search(r"Override density:\s*(\d+)", density_out)
+    current = screen_size()
+    physical_density = re.search(r"Physical density:\s*(\d+)", density_out)
+    effective_density = int(dm.group(1)) if dm else (
+        int(physical_density.group(1)) if physical_density else 420)
+    CTX.display_backup = (sm.group(1) if sm else None,
+                          int(dm.group(1)) if dm else None,
+                          effective_density)
+    target_w = current[0]
+    target_h = min(max(current[1] * 2, 4200), 5200)
+    target_density = max(280, round(effective_density * 360 / 420))
+    sh(f"wm size {target_w}x{target_h}", check=True)
+    sh(f"wm density {target_density}", check=True)
+    time.sleep(2)
+    atexit.register(restore_display)
+    info(f"高屏模式：{current[0]}x{current[1]} → {target_w}x{target_h}，"
+         f"density {effective_density} → {target_density}（结束自动还原）")
+
+
+def restore_display():
+    """还原 --tall-screen 前的 display override；可重复调用。"""
+    backup = CTX.display_backup
+    if backup is None:
+        return
+    CTX.display_backup = None
+    size, density, effective_density = backup
+    try:
+        sh(f"wm size {size}" if size else "wm size reset", check=True)
+        # Samsung 在 size override 后执行 density reset 会自行写入错误的 560；
+        # 恢复原有效密度（等于 physical 时 wm 会自动清掉 override）。
+        sh(f"wm density {density if density is not None else effective_density}", check=True)
+        time.sleep(1)
+        info("屏幕分辨率和密度已还原")
+    except Exception as e:
+        warn(f"自动还原屏幕失败：{e}；请手动执行 adb shell wm size reset / wm density reset")
+
 
 
 # --------------------------------------------------------------------------
@@ -469,16 +522,33 @@ def foreground_pkg(nodes):
     return max(counts, key=counts.get) if counts else ""
 
 
-def detect_watermarks(nodes, threshold=4):
+def detect_watermarks(nodes, threshold=8):
     """
-    自动识别水印：完全相同的文本在同一屏重复出现多次，基本可以断定是水印
-    （这个 App 的页面上铺了一层「账号名（账号 ID）」形式的水印）。
+    自动识别水印。这个 App 的水印是「账号名（账号 ID）」并在屏上重复铺开。
+
+    旧逻辑把任何重复 4 次的文字都当水印；高屏一屏 6 张卡时，「规格：无」、
+    「￥」「改价」也重复 4+ 次，商品锚点被整批删掉。现在账号格式可直接认；
+    非账号文本只有重复很多且不是卡片结构文本时才兜底判水印。
     """
     counts = {}
     for n in nodes:
         if n["text"]:
             counts[n["text"]] = counts.get(n["text"], 0) + 1
-    return {t for t, c in counts.items() if c >= threshold}
+    out = set()
+    account_pat = re.compile(r".+[（(]\d{5,}[）)]$")
+    card_literals = SOLD_OUT_TEXTS | {PROMO_ITEM_TEXT, CARD_END_TEXT, "改价", "无数据", "￥", "¥"}
+    for text, count in counts.items():
+        if count < 4:
+            continue
+        if account_pat.match(text):
+            out.add(text)
+            continue
+        is_card = (SPEC_PAT.match(text) or BARCODE_PAT.match(text)
+                   or MONTH_SALES_PAT.match(text) or STOCK_PAT.match(text)
+                   or PRICE_TOKEN_PAT.match(text) or text in card_literals)
+        if count >= threshold and not is_card:
+            out.add(text)
+    return out
 
 
 def is_detail_page(nodes):
@@ -673,6 +743,15 @@ def parse_detail(nodes, detail=None):
     texts = [n for n in nodes if n["text"] and "kaixin" not in n["text"]]
     # 渠道信息区块的位置：采购价表格的值都在它上方
     section_y = next((n["y1"] for n in texts if n["text"] == "渠道信息"), None)
+    # 「其他信息」区块：标签在左（如「礼袋绑定」），值是右侧同行节点
+    for n in texts:
+        col = OTHER_INFO_LABELS.get(n["text"])
+        if col and col not in detail:
+            row = [t for t in texts
+                   if t is not n and abs(t["cy"] - n["cy"]) <= 25
+                   and t["x1"] > n["x1"]]
+            if row:
+                detail[col] = min(row, key=lambda t: t["x1"])["text"]
     for pat, key in ((OPEN_PLATFORM_PAT, "开放平台标识"), (SPU_PAT, "SPU"),
                      (SKU_PAT, "SKU"), (DETAIL_UPC_PAT, "条码"),
                      *DETAIL_LABEL_PATS):
@@ -1241,6 +1320,7 @@ def cleanup():
         _set_animations(1)
         DumpState.anim_changed = False
         info("系统动画设置已还原")
+    restore_display()
     path = write_csv()
     if path:
         info(f"结果已写入 {path}")
@@ -1268,8 +1348,14 @@ def calibrate_detail_scrolls(prod, sw, sh_, pace, max_scrolls):
         warn(f"标定样本「{prod['title'][:20]}」的详情页没打开")
         return 0, False, [], None, {}
 
-    detail = parse_detail_with_retry(lambda: dump_xml())
-    nodes = dump_nodes_undisturbed("详情页")
+    detail = {}
+    nodes = CTX.last_detail_nodes or dump_nodes_undisturbed("标定详情页")
+    detail = parse_detail(nodes)
+    if whole_page_visible(nodes) and not channels_complete(detail):
+        # 整页一屏可见时，渠道表格没看全多半只是渲染慢
+        detail = parse_detail_with_retry(lambda: dump_xml(), detail,
+                                         tries=3, wait=0.6,
+                                         need=channels_complete)
     found, values = find_target_field(nodes)
     detail = parse_detail(nodes, detail)
     n_scroll = 0
@@ -1277,7 +1363,26 @@ def calibrate_detail_scrolls(prod, sw, sh_, pace, max_scrolls):
     x_mid = sw // 2
     y_from, y_to = int(sh_ * 0.72), int(sh_ * 0.30)
 
-    while not found and n_scroll < max_scrolls:
+    if sh_ >= 3500 and not found:
+        # 高屏整页都在一屏内；字段没出现只是 React Native 还没渲染，原地等
+        for _ in range(4):
+            time.sleep(0.5)
+            nodes = dump_nodes_undisturbed("标定详情页")
+            found, values = find_target_field(nodes)
+            detail = parse_detail(nodes, detail)
+            if found and channels_complete(detail):
+                break
+
+    while not found and n_scroll < max_scrolls and sh_ < 3500:
+        if n_scroll == 0:
+            # 整页一屏可见时，底部没渲染出来多半只是慢：先等一拍重抓，
+            # 别急着滑动（标定出的次数会被每个商品复用）
+            time.sleep(0.6)
+            nodes = dump_nodes_undisturbed("标定详情页")
+            found, values = find_target_field(nodes)
+            detail = parse_detail(nodes, detail)
+            if found:
+                break
         human_swipe(x_mid, y_from, x_mid, y_to)
         n_scroll += 1
         nap(pause)
@@ -1305,18 +1410,25 @@ def calibrate_detail_scrolls(prod, sw, sh_, pace, max_scrolls):
     return n_scroll, found, values, back, detail
 
 
-def parse_detail_with_retry(nodes_fn, detail=None, tries=3, wait=0.7):
+def parse_detail_with_retry(nodes_fn, detail=None, tries=3, wait=0.7,
+                            need=None):
     """
-    解析详情页字段，带重试：详情页刚打开时内容可能还没渲染出来（dump 只有
-    标题栏），等一拍重抓，最多 tries 次。表格被屏幕下沿裁掉时重抓没用
-    （裁掉的部分不在层级里），交给滚动中或页顶补采。
+    解析详情页字段，带重试。need 给"什么算够"（默认解析到任何字段）；
+    整页一屏可见时传 channels_complete——渠道表格没看全多半只是渲染慢，
+    等一拍重抓就行。已解析进 detail 的字段不丢。
     """
+    need = need or (lambda d: bool(d))
     for attempt in range(tries):
         detail = parse_detail(parse_nodes(nodes_fn()), detail)
-        if detail:
+        if need(detail):
             return detail
         time.sleep(wait)
     return detail
+
+
+def whole_page_visible(nodes):
+    """详情页是否整屏可见（能看到最底下的『店内码/货号』）。虚拟加高屏幕时为真。"""
+    return find_target_field(nodes)[0]
 
 
 def parse_top_detail(detail=None, up_swipes=3, tries=3):
@@ -1385,6 +1497,35 @@ def relocate(prod, nodes):
     return None
 
 
+def wait_list_after_scroll(sw, sh_, retries=5):
+    """
+    翻列表后的专用等待：FlatList 会短暂卸载旧卡片、新卡片尚未挂载，此时
+    解析不到商品并不代表离开列表。这里只等 / 微调，绝不按返回键（旧逻辑
+    因此把 App 退到桌面）。返回 (nodes, products)，实在等不到才返回空。
+    """
+    last_nodes = []
+    for attempt in range(retries):
+        nodes, products = dump_products()
+        last_nodes = nodes
+        if products:
+            return nodes, products
+        if blocking_dialog(nodes):
+            wait_while_dialog("翻列表时")
+        fg = foreground_pkg(nodes)
+        if fg and fg != APP_PKG:
+            return nodes, []
+        time.sleep(0.65 + 0.2 * attempt)
+    # 卡片可能刚好全被上下边缘截断，轻推半张卡让一张完整露出
+    x = int(sw * 0.65)
+    d = 450 if sh_ >= 3500 else 260
+    speed = TALL_SCROLL_SPEED if sh_ >= 3500 else SCROLL_SPEED
+    human_swipe(x, int(sh_ * 0.65), x, int(sh_ * 0.65) - d,
+                (int(d / speed), int(d / speed * 1.1)))
+    time.sleep(0.8)
+    nodes, products = dump_products()
+    return nodes or last_nodes, products
+
+
 def close_gap(new, prev_last, sw, sh_, max_back=3):
     """
     翻页后确认没有滑过头：上一屏最下面那个商品必须仍在屏上，两屏才是连续的，
@@ -1400,11 +1541,12 @@ def close_gap(new, prev_last, sw, sh_, max_back=3):
         if attempt == 0:
             info("    （翻页滑过头了，往回拉一点）")
         x = int(sw * 0.65)
-        back_d = int(sh_ * 0.22)
+        back_d = int(sh_ * (0.14 if sh_ >= 3500 else 0.22))
+        speed = TALL_SCROLL_SPEED if sh_ >= 3500 else SCROLL_SPEED
         human_swipe(x, int(sh_ * 0.40), x, int(sh_ * 0.40) + back_d,
-                    (int(back_d / SCROLL_SPEED), int(back_d / SCROLL_SPEED * 1.1)))
-        time.sleep(0.4)
-        _, back_on = ensure_list_page()
+                    (int(back_d / speed), int(back_d / speed * 1.1)))
+        time.sleep(0.5 if sh_ >= 3500 else 0.4)
+        _, back_on = wait_list_after_scroll(sw, sh_, retries=3)
         if not back_on:
             return new
         new = back_on
@@ -1417,10 +1559,10 @@ def close_gap(new, prev_last, sw, sh_, max_back=3):
 def open_detail(prod, load, tries=2):
     """
     点商品并等详情页真正出现，用显式等待代替固定的"等加载"停顿。
-    打不开返回 False——调用方必须跳过这个商品，绝不能接着"在详情页上滑动"
-    再按返回：实测点空之后，那几次滑动全做在了列表上（一口气划过十几个
-    商品），返回键又把列表退到了上一级，接着一路退出 App。
+    成功时把一份等过节奏后的新鲜层级放进 CTX.last_detail_nodes，调用方不必
+    立刻重复 dump；打不开返回 False。
     """
+    CTX.last_detail_nodes = []
     for _ in range(tries):
         t0 = time.time()
         pace_target = random.uniform(*load)
@@ -1429,8 +1571,10 @@ def open_detail(prod, load, tries=2):
         while time.time() - t0 < DETAIL_OPEN_TIMEOUT:
             nodes = parse_nodes(dump_xml())
             if is_detail_page(nodes):
-                # 页面出来了，但仍按原来的节奏停够再滑，别显得太急
+                # 页面出来了，但仍按原来的节奏停够再抓一份新鲜层级，给内容渲染时间
                 time.sleep(max(0.0, pace_target - (time.time() - t0)))
+                fresh_nodes = parse_nodes(dump_xml())
+                CTX.last_detail_nodes = fresh_nodes if is_detail_page(fresh_nodes) else nodes
                 return True
             if blocking_dialog(nodes):
                 wait_while_dialog("等详情页时")
@@ -1438,6 +1582,7 @@ def open_detail(prod, load, tries=2):
         # 超时：先确认是不是只是开得慢，再决定要不要重点
         nodes = parse_nodes(dump_xml())
         if is_detail_page(nodes):
+            CTX.last_detail_nodes = nodes
             return True
         fresh = relocate(prod, nodes)
         if fresh is None:
@@ -1473,16 +1618,24 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
     if not open_detail(prod, load):
         return skip("未打开", "详情页没打开，已跳过")
 
-    # verify 时详情页一打开就先解析一次顶部字段（开放平台标识 / SPU / SKU /
-    # 重量 / 采购价 / 渠道信息），带重试等渲染；滚动中的 dump 再把渠道表格补进来。
+    # verify 时详情页一打开就先解析一次；整页一屏可见（虚拟加高屏幕）时，
+    # 渠道表格没看全多半只是渲染慢，等一拍重抓直到看全。
     detail = {}
+    nodes = CTX.last_detail_nodes or parse_nodes(dump_xml())
     if verify:
-        detail = parse_detail_with_retry(lambda: dump_xml())
+        detail = parse_detail(nodes)
+        if sh_ >= 3500 and not channels_complete(detail):
+            # 高屏整页可见；字段没看全只是 React Native 渲染慢，原地等完整，
+            # 自建商品也一样（否则太早返回，导航栈尚未稳定，返回键会被吞）
+            detail = parse_detail_with_retry(
+                lambda: dump_xml(), detail, tries=4, wait=0.45,
+                need=channels_complete)
 
-    # 平台限流：别在报错页上补滑（实测把它当成"未找到"滑了 7 次），
-    # 退回列表、等一阵再重开，并给之后的每个商品加停留，把整体频率降下来。
+    # 平台限流：复用 open_detail 的层级，正常路径不再多 dump 一次；
+    # 退回列表、等一阵再重开，并给之后的每个商品加停留。
+    current_nodes = nodes
     for attempt in range(THROTTLE_RETRIES + 1):
-        if not is_throttled(parse_nodes(dump_xml())):
+        if not is_throttled(current_nodes):
             break
         wait = THROTTLE_BACKOFF[min(CTX.throttle_hits, len(THROTTLE_BACKOFF) - 1)]
         CTX.throttle_hits += 1
@@ -1501,6 +1654,8 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
         fresh = relocate(prod, parse_nodes(dump_xml())) if on_list else None
         if fresh is None or not open_detail(fresh, load):
             return skip("未打开", "限流后重开失败，已跳过")
+        current_nodes = CTX.last_detail_nodes or parse_nodes(dump_xml())
+        detail = parse_detail(current_nodes) if verify else {}
 
     x_mid = sw // 2
     y_from, y_to = int(sh_ * 0.72), int(sh_ * 0.30)
@@ -1518,40 +1673,65 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
         # 自建商品详情页没有『店内码/货号』这一行，不补滑，照常返回
         status = "自建商品"
     elif verify:
-        # 刚打开时内容可能还没渲染出来（dump 只有标题），所以每一屏滚动后
-        # 都解析一次合并：渠道信息表格和『店内码/货号』会依次经过屏幕。
-        nodes = dump_nodes_undisturbed("详情页")
+        # 高屏模式（>=3500px）整页都在一屏内：字段没出现是渲染慢，不是页面长，
+        # 原地重抓；绝不能往下滑 8 次。普通屏才按标定次数补滑。
+        nodes = (current_nodes if sh_ >= 3500 and n_scroll == 0
+                 else dump_nodes_undisturbed("详情页"))
         found, values = find_target_field(nodes)
         detail = parse_detail(nodes, detail)
         extra = 0
-        # 补滑只为『店内码/货号』没找到的商品（页面比标定样本长）；渠道表格
-        # 在上方，往下多滑永远看不到，缺失时在找到后滚回页顶补一次。
-        while not found and extra < max(0, max_scrolls - n_scroll):
-            human_swipe(x_mid, y_from, x_mid, y_to)
-            extra += 1
-            nap(pause)
-            nodes = dump_nodes_undisturbed("详情页")
-            found2, values2 = find_target_field(nodes)
-            if found2:
-                found, values = True, values2
-            detail = parse_detail(nodes, detail)
-            if found:
-                break
+        if sh_ >= 3500:
+            for _ in range(4):
+                if found and channels_complete(detail):
+                    break
+                time.sleep(0.5)
+                nodes = dump_nodes_undisturbed("详情页")
+                found2, values2 = find_target_field(nodes)
+                if found2:
+                    found, values = True, values2
+                detail = parse_detail(nodes, detail)
+            # 超长标题/多规格会把「其他信息」挤到高屏下沿外；只对缺字段的
+            # 少数商品补一次小滑，普通商品不增加任何开销。
+            if any(not detail.get(k) for k in LOWER_DETAIL_COLUMNS):
+                human_swipe(x_mid, int(sh_ * 0.72), x_mid, int(sh_ * 0.50),
+                            (500, 650))
+                time.sleep(0.35)
+                lower_nodes = dump_nodes_undisturbed("详情页下方")
+                detail = parse_detail(lower_nodes, detail)
+        else:
+            # 补滑只为『店内码/货号』没找到的商品（页面比标定样本长）；渠道表格
+            # 在上方，往下多滑永远看不到，缺失时在找到后滚回页顶补一次。
+            while not found and extra < max(0, max_scrolls - n_scroll):
+                human_swipe(x_mid, y_from, x_mid, y_to)
+                extra += 1
+                nap(pause)
+                nodes = dump_nodes_undisturbed("详情页")
+                found2, values2 = find_target_field(nodes)
+                if found2:
+                    found, values = True, values2
+                detail = parse_detail(nodes, detail)
+                if found:
+                    break
         status = "成功" if found else "未找到"
         if extra:
             info(f"    （比标定多滑了 {extra} 次）")
-        # 顶部字段（渠道表格）没看全时滚回页顶补一次，补不到就留空；
-        # 上滑次数按滚下去的量给，不用固定滑 6 次
-        if not channels_complete(detail):
+        # 普通屏的顶部渠道表格没看全才滚回页顶；高屏原地重抓已经看完整页
+        if sh_ < 3500 and not channels_complete(detail):
             detail = parse_top_detail(detail, up_swipes=n_scroll + 1)
             info("    （回滚到页顶补了渠道信息）")
 
-    nap(dwell)
+    if sh_ >= 3500:
+        time.sleep(random.uniform(0.03, 0.08))
+    else:
+        nap(dwell)
     if CTX.extra_pause:
         time.sleep(CTX.extra_pause)
     wait_while_dialog("返回前")   # 返回键会直接关掉弹窗
     tap_back(back)
-    nap(settle)
+    if sh_ >= 3500:
+        time.sleep(random.uniform(0.45, 0.65))
+    else:
+        nap(settle)
 
     code, artno = split_field_values(values)
     if verify:
@@ -1586,11 +1766,16 @@ def scroll_list(sw, sh_, pace, anchor=None):
         d = anchor["box"][1] - int(sh_ * LIST_TOP_Y)
     else:
         d = int(sh_ * 0.45)
-    d = max(SCROLL_MIN, min(d, int(sh_ * 0.70)))
+    d = max(SCROLL_MIN, min(d, TALL_SCROLL_MAX if sh_ >= 3500
+                            else int(sh_ * 0.70)))
     y1 = int(sh_ * 0.80)
-    dur = int(d / SCROLL_SPEED)
+    speed = TALL_SCROLL_SPEED if sh_ >= 3500 else SCROLL_SPEED
+    dur = int(d / speed)
     human_swipe(x, y1, x, y1 - d, (dur, int(dur * 1.1)))
-    nap(pace[1])
+    if sh_ >= 3500:
+        time.sleep(0.5)  # FlatList 重新挂载卡片；ultra 的 0.12s 不够
+    else:
+        nap(pace[1])
 
 
 def ensure_list_page(max_back=3):
@@ -1641,11 +1826,14 @@ def main():
         description="牵牛花商品详情批量浏览（纯 ADB，无 LLM）",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--count", type=int, default=20,
-                    help="要浏览的商品数量（默认 20）")
+                    help="要浏览的商品数量；0=读取当前列表标题里的平台总数，跑到全量")
     ap.add_argument("--serial", help="指定设备序列号")
     ap.add_argument("--adb", default=DEFAULT_ADB, help="adb 可执行文件路径")
     ap.add_argument("--pace", choices=list(PACING), default="natural",
-                    help="操作节奏：fast 最快 / natural 默认 / demo 最慢最适合录像")
+                    help="操作节奏：ultra 最快（建议配 --tall-screen）/ fast / natural 默认 / demo 录像演示")
+    ap.add_argument("--tall-screen", action="store_true",
+                    help="临时把逻辑屏幕改成双高并降低密度：列表一屏约 6 张卡、详情整页"
+                         "一次读完；结束/中断/报错自动恢复原分辨率和密度")
     ap.add_argument("--no-helper", action="store_true",
                     help="不使用 ARTEMIS 无障碍助手加速，强制走 input / uiautomator")
     ap.add_argument("--no-helper-dump", action="store_true",
@@ -1686,6 +1874,7 @@ def main():
     os.makedirs(CTX.out_dir, exist_ok=True)
 
     signal.signal(signal.SIGINT, on_sigint)
+    signal.signal(signal.SIGTERM, on_sigint)
 
     step("环境检查")
     require_device()
@@ -1693,6 +1882,9 @@ def main():
     if args.restore_a11y:
         restore_a11y()
         return
+
+    if args.tall_screen:
+        setup_tall_screen()
 
     sw, sh_ = screen_size()
     info(f"屏幕分辨率：{sw}x{sh_}")
@@ -1712,7 +1904,16 @@ def main():
 
     step("标定商品列表")
     wait_while_dialog("开始前")
-    nodes, products = dump_products()
+    nodes, products = [], []
+    # 分辨率切换会触发 MRN Activity 重建，列表通常要 3-5 秒重新挂载；
+    # 显式等商品出现，不能把重绘过渡误报成「不在列表页」。
+    for attempt in range(8):
+        nodes, products = dump_products()
+        if products:
+            break
+        if blocking_dialog(nodes):
+            wait_while_dialog("开始前")
+        time.sleep(0.8 + 0.15 * attempt)
 
     fg = foreground_pkg(nodes)
     if fg and fg != APP_PKG:
@@ -1725,6 +1926,17 @@ def main():
     if not products:
         die("当前页面没有识别到任何商品行。\n"
             "请先在手机上把牵牛花切到商品列表页（能看到「规格：」「条码:」的那个页面）再跑。")
+
+    if args.count <= 0:
+        totals = []
+        for n in nodes:
+            m = re.search(r"（([\d,]+)）$", n["text"])
+            if m and n["x1"] > sw * 0.15 and n["y1"] < sh_ * 0.12:
+                totals.append((n["y1"], int(m.group(1).replace(",", "")), n["text"]))
+        if not totals:
+            die("--count 0 需要当前列表标题含商品总数（如『全部商品（12026）』），但未读到")
+        _, args.count, total_text = min(totals)
+        info(f"全量模式：{total_text} → 目标 {args.count} 个")
 
     info(f"当前屏识别到 {len(products)} 个商品：")
     for i, p in enumerate(products, 1):
@@ -1762,10 +1974,9 @@ def main():
             warn(f"样本「{sample['title'][:20]}」标定失败，换下一个再试")
 
         if not ok:
-            # 标定失败时 calibrate 返回的是 max_scrolls，绝不能拿它当每个
-            # 商品的滚动次数：既慢（8 次滑动 ≈ +8.5 秒/个），又容易滑过头
-            # 把 App 推出商品列表。回退成 1 次，宁可少滑也不要失控。
-            n_scroll = 1
+            # 标定失败：高屏整页可见，不允许盲滑；普通屏回退 1 次，宁可少滑
+            # 也不要拿 max_scrolls 拖慢整轮或滑出页面。
+            n_scroll = 0 if sh_ >= 3500 else 1
             warn(f"标定未成功，详情页滑动次数回退为 {n_scroll} 次。"
                  "校验结果可能偏少，但不会拖慢整轮或滑出页面。")
 
@@ -1797,30 +2008,41 @@ def main():
             if cursor >= len(products):
                 # 当前屏点完了，把本屏最后一个商品挪到顶部，重新标定坐标
                 scroll_list(sw, sh_, pace, anchor=screen_last)
-                _, new = ensure_list_page()
+                _, new = wait_list_after_scroll(sw, sh_)
                 if not new:
-                    stop_reason = ("已离开商品列表页且无法自动返回。"
-                                   "这不是列表到底——请检查 App 当前停在哪一页。")
+                    stop_reason = ("翻页后列表连续多次没有完整商品卡片；已停止，"
+                                   "不会盲按返回退出 App。可用 --resume 续跑。")
                     warn(stop_reason)
                     break
-                new = close_gap(new, screen_last, sw, sh_)
+                if sh_ < 3500:
+                    new = close_gap(new, screen_last, sw, sh_)
                 new_keys = {p["title"] for p in new}
                 if new_keys == last_keys:
                     # 翻页后画面没变：可能是分页懒加载还没渲染出下一屏，多等
-                    # 几次；仍然不变才是真到底。只看"画面变没变"，不看"有没有
-                    # 没处理过的商品"——续跑时整屏都处理过是正常的，不是到底。
+                    # 几次；空画面不算"变了"，避免 new[-1] 崩溃。
+                    advanced = False
                     for _ in range(LAZY_LOAD_RETRIES):
-                        time.sleep(1.6)
+                        time.sleep(0.8 if sh_ >= 3500 else 1.6)
                         scroll_list(sw, sh_, pace)
-                        _, new = ensure_list_page()
-                        new_keys = {p["title"] for p in new}
-                        if new_keys != last_keys:
+                        _, candidate = wait_list_after_scroll(sw, sh_)
+                        if not candidate:
+                            continue
+                        if sh_ < 3500:
+                            candidate = close_gap(candidate, screen_last, sw, sh_)
+                        candidate_keys = {p["title"] for p in candidate}
+                        if candidate_keys and candidate_keys != last_keys:
+                            new, new_keys = candidate, candidate_keys
                             info("（等到了新加载的商品）")
+                            advanced = True
                             break
-                    else:
+                    if not advanced:
                         stop_reason = "多次翻页画面不再变化，已到列表底部。"
                         warn(stop_reason)
                         break
+                if not new:
+                    stop_reason = "翻页结果为空，已安全停止；可用 --resume 续跑。"
+                    warn(stop_reason)
+                    break
                 last_keys = new_keys
                 screen_last = new[-1]
                 marks = done_marks()
@@ -1845,10 +2067,15 @@ def main():
                 nodes = parse_nodes(dump_xml())
             on_screen = find_products(nodes, detect_watermarks(nodes))
             if not on_screen:
-                _, on_screen = ensure_list_page()
+                # 返回动画尚未结束就等；若确实还在详情页，只补一次明确的返回。
+                # 不调用会盲按多次返回的 ensure_list_page。
+                if is_detail_page(nodes):
+                    tap_back(back)
+                    time.sleep(0.7)
+                _, on_screen = wait_list_after_scroll(sw, sh_, retries=4)
                 if not on_screen:
-                    stop_reason = ("已离开商品列表页且无法自动返回。"
-                                   "这不是列表到底——请检查 App 当前停在哪一页。")
+                    stop_reason = ("点下一个商品前无法读到列表，已安全停止；"
+                                   "不会继续按返回退出 App，可用 --resume 续跑。")
                     warn(stop_reason)
                     break
             screen_last = on_screen[-1]

@@ -51,6 +51,12 @@ class ProductIdentityTests(unittest.TestCase):
         marks = scan.done_marks()
         self.assertFalse(scan.is_done({"title": "同名商品", "barcode": "2222222222222"}, marks))
         self.assertTrue(scan.is_done({"title": "改过标题", "barcode": "1111111111111"}, marks))
+    def test_repeated_card_labels_are_not_mistaken_for_watermarks(self):
+        nodes = ([{"text": "规格：无"}] * 8
+                 + [{"text": "￥"}] * 20
+                 + [{"text": "改价"}] * 8
+                 + [{"text": "kaixinCHEnxue（469721）"}] * 4)
+        self.assertEqual(scan.detect_watermarks(nodes), {"kaixinCHEnxue（469721）"})
 
 
 class CardParsingTests(unittest.TestCase):
@@ -147,6 +153,19 @@ class DetailParsingTests(unittest.TestCase):
         import qnh_product_scan as scan
         nodes = scan.parse_nodes(open("/tmp/qnh_detail6.xml").read())
         self.assertEqual(scan.parse_detail(nodes), {})
+
+    def test_parses_other_information_rows(self):
+        nodes = [
+            node("礼袋绑定", 30, 100, 210, 140), node("0个礼袋", 300, 100, 500, 140),
+            node("可售日期", 30, 160, 210, 200), node("不限", 300, 160, 500, 200),
+            node("是否力荐", 30, 220, 210, 260), node("否", 300, 220, 500, 260),
+            node("是否标品", 30, 280, 210, 320), node("标品", 300, 280, 500, 320),
+        ]
+        detail = scan.parse_detail(nodes)
+        self.assertEqual(detail["礼袋"], "0个礼袋")
+        self.assertEqual(detail["可售日期"], "不限")
+        self.assertEqual(detail["是否力荐"], "否")
+        self.assertEqual(detail["是否标品"], "标品")
 
     def test_merge_keeps_earlier_fields(self):
         import qnh_product_scan as scan

@@ -47,9 +47,12 @@ DETAIL_COLUMNS = ["开放平台标识", "SPU", "SKU", "重量", "采购价_详�
                   "美团闪购状态", "美团闪购零售价", "美团闪购库存",
                   "饿了么状态", "饿了么零售价", "饿了么库存",
                   "京东到家状态", "京东到家零售价", "京东到家库存",
-                  "卖点", "可售日期", "礼袋"]
+                  "卖点", "可售日期", "礼袋", "是否力荐", "是否标品"]
 # 详情页的渠道状态 → 库的上架状态枚举
 LISTING_STATUS_MAP = {"已上架": "on_shelf", "已下架": "off_shelf", "未上线": "not_online"}
+# 「其他信息」的是非字段 → tinyint
+YES_NO_MAP = {"是": 1, "否": 0}
+IS_STANDARD_MAP = {"标品": 1, "非标品": 0, "自建": 0, "自建商品": 0}
 
 STAMP_PAT = re.compile(r"qnh_scan_(\d{8}-\d{6})")
 PURCHASE_PAT = re.compile(r"^(\d+(?:\.\d+)?)(?:/(\S+))?$")
@@ -347,6 +350,8 @@ def main():
                     selling_points=r.get("卖点") or None,
                     sellable_date_text=r.get("可售日期") or None,
                     gift_bag_text=r.get("礼袋") or None,
+                    is_recommended=YES_NO_MAP.get(r.get("是否力荐", "")),
+                    is_standard=IS_STANDARD_MAP.get(r.get("是否标品", "")),
                     # 三个渠道价没拆出来时（价格行数不对），原文留在这里备查
                     other_text=(r.get("价格原文") or None) if not r.get(col) else None,
                     evidence_uri=row_evidence(csv_path, r),
