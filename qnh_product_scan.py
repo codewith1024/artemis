@@ -48,7 +48,7 @@ python3（标准库即可，无第三方包）、adb、scrcpy（录制时才需�
   python3 qnh_product_scan.py --count 0 --verify-every 1 --tall-screen --pace ultra --record
 
 按 Ctrl-C 可随时中断，脚本会妥善收尾（保存 CSV、停止录像、还原屏幕）；
-`--resume 上一轮.csv` 可续跑。
+默认每 50 个商品原子保存一次断点，`--resume 上一轮.csv` 可续跑。
 """
 
 import argparse
@@ -1381,11 +1381,15 @@ def write_csv():
     if not CTX.rows:
         return None
     path = os.path.join(CTX.out_dir, f"qnh_scan_{CTX.run_stamp}.csv")
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(CSV_COLUMNS + CARD_COLUMNS + DETAIL_COLUMNS)
         w.writerows(r + card_cols(r[1], r[2]) + detail_cols(r[1])
                     for r in CTX.rows)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
     return path
 
 
@@ -2027,6 +2031,8 @@ def main():
     ap.add_argument("--resume", metavar="CSV",
                     help="从上一轮的 CSV 接着跑：已「成功」和「自建商品」的只翻页经过、"
                          "不再点开；「未找到」「未打开」的重做。新旧结果合并写进本轮的新 CSV")
+    ap.add_argument("--checkpoint-every", type=int, default=50,
+                    help="每处理多少个商品原子保存一次 CSV（默认 50；0=只在结束时保存）")
     args = ap.parse_args()
 
     if args.seed is not None:
@@ -2281,6 +2287,10 @@ def main():
             visit_product(done, target, n_scroll, back,
                           sw, sh_, pace, verify, args.max_scrolls)
             cursor += 1
+            if (args.checkpoint_every > 0
+                    and len(CTX.rows) % args.checkpoint_every == 0):
+                checkpoint = write_csv()
+                info(f"    （断点已保存：{len(CTX.rows)} 个 → {checkpoint}）")
 
         elapsed = time.time() - t_start
         step("完成")
