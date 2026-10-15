@@ -52,7 +52,7 @@
 
 <h1>retail_price_snapshot 表结构说明</h1>
 <div class="meta">
-  服务器 <code>192.168.100.200:3306</code>（和 qnh_data 同一台，需公司内网）· 库名 <code>retail_price_snapshot</code> · 更新于 2026-10-08
+  服务器 <code>192.168.100.200:3306</code>（和 qnh_data 同一台，需公司内网）· 库名 <code>retail_price_snapshot</code> · 更新于 2026-10-09
 </div>
 
 <p class="lead">一句话：记录<b>我们和竞对门店</b>在美团、饿了么、京东上，<b>某个时间点在卖什么、卖多少钱</b>，用来比价、盯竞对动作。</p>
@@ -87,7 +87,7 @@
 
 <div class="card">
   <h3>采集记录 <code>store_snapshot</code></h3>
-  <p>每采集一次一行：什么时候、用什么方式、成没成功，以及当时门店的起送价、配送费、评分、配送时长。截图和录像不进库，存放位置记在这里。</p>
+  <p>每采集一次一行：什么时候、用什么方式、成没成功，以及当时门店的起送价、配送费、评分、配送时长。截图和录像不进库，存放位置记在这里；牵牛花完整采集还记录最终 manifest 与 CSV 的 SHA-256，既能审计原始证据，也能防止同一份采集重复入库。</p>
 </div>
 
 <div class="card">
@@ -122,6 +122,15 @@
   <li>时间都是北京时间。</li>
   <li>每个字段是什么意思，都写在数据库的字段注释里，用 Navicat / DBeaver 打开表结构就能看到。</li>
 </ul>
+
+<h2>牵牛花采集入库</h2>
+<p>正式流程使用固定门店 profile，依次完成 App 采集、完整性门禁、事务内逐字段校验和重连复核。默认只验证后回滚，不会留下数据库记录：</p>
+<pre>python3 qnh_capture_pipeline.py --profile xiniu-changan</pre>
+<p>确认 dry-run 报告后，使用同一份不可变 manifest 提交，无需重新采集：</p>
+<pre>python3 qnh_capture_pipeline.py --profile xiniu-changan \
+  --from-manifest /path/to/qnh_scan_YYYYMMDD-HHMMSS.manifest.json \
+  --commit</pre>
+<p class="note">数量不符、详情缺失、CSV 被改动或采集中断都会在连接数据库前失败；只有显式 <code>--commit</code> 才会持久化。</p>
 
 <h2>查一下试试</h2>
 <p class="note">某家竞对门店在美团上现在的价格：</p>

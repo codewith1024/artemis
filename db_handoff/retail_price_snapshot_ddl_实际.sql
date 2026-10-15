@@ -1,6 +1,6 @@
 -- =============================================================================
 -- retail_price_snapshot 实际表结构
--- 版本：v4（7 张表 + 1 个视图）  日期：2026-10-08
+-- 版本：v5（7 张表 + 1 个视图）  日期：2026-10-09
 -- MySQL：8.0.46  实例：192.168.100.200
 -- 来源：直接读取线上库 SHOW CREATE TABLE / VIEW；不含业务数据。
 -- =============================================================================
@@ -250,6 +250,9 @@ CREATE TABLE `store_snapshot` (
   `screen_count` int DEFAULT NULL COMMENT '[v2] 滚屏方式采集的屏数',
   `covered_categories` varchar(2048) DEFAULT NULL COMMENT '[v2] 本次覆盖的一级类目（分段采、没采全时填写，| 分隔）',
   `evidence_uri` varchar(512) DEFAULT NULL COMMENT '[v2] 录像 / 截图 / 原始文件的存放位置（目录或对象存储前缀）',
+  `manifest_uri` varchar(512) DEFAULT NULL COMMENT 'finalized capture manifest path; progress/result files are separate',
+  `manifest_sha256` char(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL COMMENT 'SHA-256 of immutable finalized manifest bytes',
+  `csv_sha256` char(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL COMMENT 'SHA-256 of the final CSV bytes',
   `store_url` varchar(1024) DEFAULT NULL COMMENT '[v3] 本次采集的门店页面网址',
   `request_longitude` decimal(10,6) DEFAULT NULL COMMENT '采集时定位经度（价格、可售范围随定位变化）',
   `request_latitude` decimal(10,6) DEFAULT NULL COMMENT '采集时定位纬度',
@@ -278,6 +281,7 @@ CREATE TABLE `store_snapshot` (
   `updated_at` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_store_snapshot` (`store_snapshot_id`),
+  UNIQUE KEY `uk_store_snapshot_manifest` (`channel_code`,`store_code`,`manifest_sha256`),
   KEY `idx_store_snapshot_batch` (`batch_id`,`store_code`),
   KEY `idx_store_snapshot_store` (`channel_code`,`store_code`,`status`,`snapshot_hour`),
   KEY `idx_store_snapshot_status` (`status`,`started_at`),

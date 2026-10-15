@@ -1,6 +1,6 @@
 -- =============================================================================
 -- 门店商品价格快照库建表脚本（当前精简版）
--- 版本：v4  日期：2026-10-08
+-- 版本：v5  日期：2026-10-09
 -- 目标：MySQL 8.0.16+；已部署：192.168.100.200 / retail_price_snapshot
 -- 对象：7 张表 + 1 个视图
 --   dim_store / dim_store_competitor_rel / store_snapshot
@@ -255,6 +255,9 @@ CREATE TABLE IF NOT EXISTS `store_snapshot` (
   `screen_count` int DEFAULT NULL COMMENT '[v2] 滚屏方式采集的屏数',
   `covered_categories` varchar(2048) DEFAULT NULL COMMENT '[v2] 本次覆盖的一级类目（分段采、没采全时填写，| 分隔）',
   `evidence_uri` varchar(512) DEFAULT NULL COMMENT '[v2] 录像 / 截图 / 原始文件的存放位置（目录或对象存储前缀）',
+  `manifest_uri` varchar(512) DEFAULT NULL COMMENT '[v5] 最终不可变采集清单路径；progress/result 文件独立存放',
+  `manifest_sha256` char(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL COMMENT '[v5] 最终 manifest 原始字节的 SHA-256',
+  `csv_sha256` char(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL COMMENT '[v5] 最终 CSV 原始字节的 SHA-256',
   `store_url` varchar(1024) DEFAULT NULL COMMENT '[v3] 本次采集的门店页面网址',
   `request_longitude` decimal(10,6) DEFAULT NULL COMMENT '采集时定位经度（价格、可售范围随定位变化）',
   `request_latitude` decimal(10,6) DEFAULT NULL COMMENT '采集时定位纬度',
@@ -283,6 +286,7 @@ CREATE TABLE IF NOT EXISTS `store_snapshot` (
   `updated_at` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_store_snapshot` (`store_snapshot_id`),
+  UNIQUE KEY `uk_store_snapshot_manifest` (`channel_code`,`store_code`,`manifest_sha256`),
   KEY `idx_store_snapshot_batch` (`batch_id`,`store_code`),
   KEY `idx_store_snapshot_store` (`channel_code`,`store_code`,`status`,`snapshot_hour`),
   KEY `idx_store_snapshot_status` (`status`,`started_at`),

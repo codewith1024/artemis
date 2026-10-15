@@ -121,7 +121,7 @@ Thumbs.db
 qnh_scan_*.csv
 qnh_scan_*.mp4
 qnh_scan_*.mkv
+qnh_scan_*.progress.json
+qnh_scan_*.manifest.json
+qnh_scan_*.result.json
 .a11y_backup.txt
-
-# web_scroll_record.py 的产出：录像、截图、页面文字
-web_runs/
