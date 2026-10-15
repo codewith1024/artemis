@@ -1,0 +1,1114 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-10",
+  "full_store_count": 12058,
+  "excluded_virtual_categories": [
+    "精选"
+  ],
+  "segments": [
+    {
+      "order": 1,
+      "top": "休闲零食",
+      "leaf": "薯片薯条",
+      "expected_count": 169
+    },
+    {
+      "order": 2,
+      "top": "休闲零食",
+      "leaf": "辣条面筋",
+      "expected_count": 113
+    },
+    {
+      "order": 3,
+      "top": "休闲零食",
+      "leaf": "肉干肉脯",
+      "expected_count": 119
+    },
+    {
+      "order": 4,
+      "top": "休闲零食",
+      "leaf": "坚果炒货",
+      "expected_count": 118
+    },
+    {
+      "order": 5,
+      "top": "休闲零食",
+      "leaf": "饼干曲奇威化",
+      "expected_count": 129
+    },
+    {
+      "order": 6,
+      "top": "休闲零食",
+      "leaf": "蜜饯果干",
+      "expected_count": 92
+    },
+    {
+      "order": 7,
+      "top": "休闲零食",
+      "leaf": "鸭货鸡爪卤味",
+      "expected_count": 112
+    },
+    {
+      "order": 8,
+      "top": "休闲零食",
+      "leaf": "糕点点心派",
+      "expected_count": 117
+    },
+    {
+      "order": 9,
+      "top": "休闲零食",
+      "leaf": "巧克力糖果",
+      "expected_count": 159
+    },
+    {
+      "order": 10,
+      "top": "休闲零食",
+      "leaf": "面包吐司糕点",
+      "expected_count": 102
+    },
+    {
+      "order": 11,
+      "top": "休闲零食",
+      "leaf": "海味零食",
+      "expected_count": 51
+    },
+    {
+      "order": 12,
+      "top": "休闲零食",
+      "leaf": "锅巴米饼",
+      "expected_count": 73
+    },
+    {
+      "order": 13,
+      "top": "休闲零食",
+      "leaf": "魔芋豆干素食",
+      "expected_count": 62
+    },
+    {
+      "order": 14,
+      "top": "休闲零食",
+      "leaf": "其他零食",
+      "expected_count": 53
+    },
+    {
+      "order": 15,
+      "top": "酒水乳饮",
+      "leaf": "茶饮料",
+      "expected_count": 125
+    },
+    {
+      "order": 16,
+      "top": "酒水乳饮",
+      "leaf": "碳酸饮料",
+      "expected_count": 157
+    },
+    {
+      "order": 17,
+      "top": "酒水乳饮",
+      "leaf": "矿泉水",
+      "expected_count": 71
+    },
+    {
+      "order": 18,
+      "top": "酒水乳饮",
+      "leaf": "啤酒单瓶",
+      "expected_count": 41
+    },
+    {
+      "order": 19,
+      "top": "酒水乳饮",
+      "leaf": "精酿白啤果味啤",
+      "expected_count": 73
+    },
+    {
+      "order": 20,
+      "top": "酒水乳饮",
+      "leaf": "整箱组合装啤酒",
+      "expected_count": 66
+    },
+    {
+      "order": 21,
+      "top": "酒水乳饮",
+      "leaf": "国际啤酒",
+      "expected_count": 30
+    },
+    {
+      "order": 22,
+      "top": "酒水乳饮",
+      "leaf": "鸡尾酒",
+      "expected_count": 19
+    },
+    {
+      "order": 23,
+      "top": "酒水乳饮",
+      "leaf": "白酒烧酒",
+      "expected_count": 19
+    },
+    {
+      "order": 24,
+      "top": "酒水乳饮",
+      "leaf": "果汁饮料",
+      "expected_count": 94
+    },
+    {
+      "order": 25,
+      "top": "酒水乳饮",
+      "leaf": "低温奶",
+      "expected_count": 19
+    },
+    {
+      "order": 26,
+      "top": "酒水乳饮",
+      "leaf": "乳品",
+      "expected_count": 110
+    },
+    {
+      "order": 27,
+      "top": "酒水乳饮",
+      "leaf": "功能饮料",
+      "expected_count": 58
+    },
+    {
+      "order": 28,
+      "top": "酒水乳饮",
+      "leaf": "大桶水",
+      "expected_count": 11
+    },
+    {
+      "order": 29,
+      "top": "酒水乳饮",
+      "leaf": "咖啡",
+      "expected_count": 40
+    },
+    {
+      "order": 30,
+      "top": "酒水乳饮",
+      "leaf": "冲调粉剂",
+      "expected_count": 83
+    },
+    {
+      "order": 31,
+      "top": "酒水乳饮",
+      "leaf": "其他饮料",
+      "expected_count": 39
+    },
+    {
+      "order": 32,
+      "top": "方便速食",
+      "leaf": "桶装面",
+      "expected_count": 106
+    },
+    {
+      "order": 33,
+      "top": "方便速食",
+      "leaf": "香肠火腿",
+      "expected_count": 53
+    },
+    {
+      "order": 34,
+      "top": "方便速食",
+      "leaf": "袋装面",
+      "expected_count": 65
+    },
+    {
+      "order": 35,
+      "top": "方便速食",
+      "leaf": "干脆面",
+      "expected_count": 25
+    },
+    {
+      "order": 36,
+      "top": "方便速食",
+      "leaf": "咸蛋卤蛋",
+      "expected_count": 33
+    },
+    {
+      "order": 37,
+      "top": "方便速食",
+      "leaf": "粉丝面皮",
+      "expected_count": 47
+    },
+    {
+      "order": 38,
+      "top": "方便速食",
+      "leaf": "火鸡面",
+      "expected_count": 12
+    },
+    {
+      "order": 39,
+      "top": "方便速食",
+      "leaf": "干拌面",
+      "expected_count": 12
+    },
+    {
+      "order": 40,
+      "top": "方便速食",
+      "leaf": "自热速食",
+      "expected_count": 17
+    },
+    {
+      "order": 41,
+      "top": "方便速食",
+      "leaf": "速食粥",
+      "expected_count": 12
+    },
+    {
+      "order": 42,
+      "top": "方便速食",
+      "leaf": "罐头",
+      "expected_count": 16
+    },
+    {
+      "order": 43,
+      "top": "方便速食",
+      "leaf": "五连包",
+      "expected_count": 29
+    },
+    {
+      "order": 44,
+      "top": "雪糕冰品",
+      "leaf": "雪糕",
+      "expected_count": 182
+    },
+    {
+      "order": 45,
+      "top": "雪糕冰品",
+      "leaf": "冰球冰块",
+      "expected_count": 6
+    },
+    {
+      "order": 46,
+      "top": "雪糕冰品",
+      "leaf": "速冻食品",
+      "expected_count": 15
+    },
+    {
+      "order": 47,
+      "top": "个人洗护",
+      "leaf": "姨妈巾",
+      "expected_count": 243
+    },
+    {
+      "order": 48,
+      "top": "个人洗护",
+      "leaf": "洗发护发",
+      "expected_count": 135
+    },
+    {
+      "order": 49,
+      "top": "个人洗护",
+      "leaf": "牙膏牙刷",
+      "expected_count": 121
+    },
+    {
+      "order": 50,
+      "top": "个人洗护",
+      "leaf": "洗浴用品",
+      "expected_count": 153
+    },
+    {
+      "order": 51,
+      "top": "个人洗护",
+      "leaf": "口腔护理",
+      "expected_count": 48
+    },
+    {
+      "order": 52,
+      "top": "个人洗护",
+      "leaf": "男士洗护",
+      "expected_count": 29
+    },
+    {
+      "order": 53,
+      "top": "个人洗护",
+      "leaf": "身体护理",
+      "expected_count": 47
+    },
+    {
+      "order": 54,
+      "top": "个人洗护",
+      "leaf": "姨妈好物",
+      "expected_count": 70
+    },
+    {
+      "order": 55,
+      "top": "个人洗护",
+      "leaf": "润肤润唇",
+      "expected_count": 36
+    },
+    {
+      "order": 56,
+      "top": "个人洗护",
+      "leaf": "香皂",
+      "expected_count": 13
+    },
+    {
+      "order": 57,
+      "top": "个人洗护",
+      "leaf": "其他洗护",
+      "expected_count": 31
+    },
+    {
+      "order": 58,
+      "top": "纸巾家清",
+      "leaf": "抽纸卷纸",
+      "expected_count": 115
+    },
+    {
+      "order": 59,
+      "top": "纸巾家清",
+      "leaf": "手帕湿巾",
+      "expected_count": 104
+    },
+    {
+      "order": 60,
+      "top": "纸巾家清",
+      "leaf": "洗衣洗护",
+      "expected_count": 110
+    },
+    {
+      "order": 61,
+      "top": "纸巾家清",
+      "leaf": "厨房清洁",
+      "expected_count": 47
+    },
+    {
+      "order": 62,
+      "top": "纸巾家清",
+      "leaf": "卫浴清洁",
+      "expected_count": 50
+    },
+    {
+      "order": 63,
+      "top": "纸巾家清",
+      "leaf": "消毒除菌",
+      "expected_count": 20
+    },
+    {
+      "order": 64,
+      "top": "纸巾家清",
+      "leaf": "驱蚊杀虫",
+      "expected_count": 66
+    },
+    {
+      "order": 65,
+      "top": "纸巾家清",
+      "leaf": "香薰防潮除螨",
+      "expected_count": 38
+    },
+    {
+      "order": 66,
+      "top": "纸巾家清",
+      "leaf": "其他清洁",
+      "expected_count": 28
+    },
+    {
+      "order": 67,
+      "top": "成人用品",
+      "leaf": "杜蕾斯",
+      "expected_count": 22
+    },
+    {
+      "order": 68,
+      "top": "成人用品",
+      "leaf": "冈本",
+      "expected_count": 19
+    },
+    {
+      "order": 69,
+      "top": "成人用品",
+      "leaf": "杰士邦",
+      "expected_count": 32
+    },
+    {
+      "order": 70,
+      "top": "成人用品",
+      "leaf": "情趣玩具",
+      "expected_count": 47
+    },
+    {
+      "order": 71,
+      "top": "成人用品",
+      "leaf": "名流",
+      "expected_count": 21
+    },
+    {
+      "order": 72,
+      "top": "成人用品",
+      "leaf": "润滑延时",
+      "expected_count": 20
+    },
+    {
+      "order": 73,
+      "top": "成人用品",
+      "leaf": "情趣服",
+      "expected_count": 40
+    },
+    {
+      "order": 74,
+      "top": "成人用品",
+      "leaf": "验孕检测",
+      "expected_count": 8
+    },
+    {
+      "order": 75,
+      "top": "成人用品",
+      "leaf": "大象",
+      "expected_count": 5
+    },
+    {
+      "order": 76,
+      "top": "成人用品",
+      "leaf": "其他避孕套",
+      "expected_count": 13
+    },
+    {
+      "order": 77,
+      "top": "家居日用",
+      "leaf": "收纳整理",
+      "expected_count": 267
+    },
+    {
+      "order": 78,
+      "top": "家居日用",
+      "leaf": "生活日用",
+      "expected_count": 87
+    },
+    {
+      "order": 79,
+      "top": "家居日用",
+      "leaf": "清洁工具",
+      "expected_count": 359
+    },
+    {
+      "order": 80,
+      "top": "家居日用",
+      "leaf": "文具办公",
+      "expected_count": 346
+    },
+    {
+      "order": 81,
+      "top": "家居日用",
+      "leaf": "厨具餐具",
+      "expected_count": 568
+    },
+    {
+      "order": 82,
+      "top": "家居日用",
+      "leaf": "医疗防护",
+      "expected_count": 181
+    },
+    {
+      "order": 83,
+      "top": "家居日用",
+      "leaf": "家装五金",
+      "expected_count": 313
+    },
+    {
+      "order": 84,
+      "top": "家居日用",
+      "leaf": "一次性用品",
+      "expected_count": 140
+    },
+    {
+      "order": 85,
+      "top": "家居日用",
+      "leaf": "节庆礼品",
+      "expected_count": 143
+    },
+    {
+      "order": 86,
+      "top": "家居日用",
+      "leaf": "槟榔专区",
+      "expected_count": 36
+    },
+    {
+      "order": 87,
+      "top": "家居日用",
+      "leaf": "桌椅板凳",
+      "expected_count": 44
+    },
+    {
+      "order": 88,
+      "top": "家居日用",
+      "leaf": "玩具棋牌",
+      "expected_count": 135
+    },
+    {
+      "order": 89,
+      "top": "家居日用",
+      "leaf": "汽车用品",
+      "expected_count": 30
+    },
+    {
+      "order": 90,
+      "top": "家居日用",
+      "leaf": "花卉绿植",
+      "expected_count": 33
+    },
+    {
+      "order": 91,
+      "top": "服饰鞋包",
+      "leaf": "袜子",
+      "expected_count": 214
+    },
+    {
+      "order": 92,
+      "top": "服饰鞋包",
+      "leaf": "发饰",
+      "expected_count": 104
+    },
+    {
+      "order": 93,
+      "top": "服饰鞋包",
+      "leaf": "女鞋",
+      "expected_count": 151
+    },
+    {
+      "order": 94,
+      "top": "服饰鞋包",
+      "leaf": "女装",
+      "expected_count": 387
+    },
+    {
+      "order": 95,
+      "top": "服饰鞋包",
+      "leaf": "女士内裤",
+      "expected_count": 65
+    },
+    {
+      "order": 96,
+      "top": "服饰鞋包",
+      "leaf": "男士内裤",
+      "expected_count": 29
+    },
+    {
+      "order": 97,
+      "top": "服饰鞋包",
+      "leaf": "女士内衣",
+      "expected_count": 44
+    },
+    {
+      "order": 98,
+      "top": "服饰鞋包",
+      "leaf": "丝袜",
+      "expected_count": 65
+    },
+    {
+      "order": 99,
+      "top": "服饰鞋包",
+      "leaf": "男装",
+      "expected_count": 221
+    },
+    {
+      "order": 100,
+      "top": "服饰鞋包",
+      "leaf": "男鞋",
+      "expected_count": 53
+    },
+    {
+      "order": 101,
+      "top": "服饰鞋包",
+      "leaf": "手表眼镜",
+      "expected_count": 31
+    },
+    {
+      "order": 102,
+      "top": "服饰鞋包",
+      "leaf": "帽子",
+      "expected_count": 87
+    },
+    {
+      "order": 103,
+      "top": "服饰鞋包",
+      "leaf": "耳环戒指",
+      "expected_count": 35
+    },
+    {
+      "order": 104,
+      "top": "服饰鞋包",
+      "leaf": "其他服饰配饰",
+      "expected_count": 77
+    },
+    {
+      "order": 105,
+      "top": "家纺布艺",
+      "leaf": "枕头枕套",
+      "expected_count": 63
+    },
+    {
+      "order": 106,
+      "top": "家纺布艺",
+      "leaf": "床单被套",
+      "expected_count": 80
+    },
+    {
+      "order": 107,
+      "top": "家纺布艺",
+      "leaf": "床垫",
+      "expected_count": 53
+    },
+    {
+      "order": 108,
+      "top": "家纺布艺",
+      "leaf": "被子被芯",
+      "expected_count": 79
+    },
+    {
+      "order": 109,
+      "top": "家纺布艺",
+      "leaf": "抱枕靠枕",
+      "expected_count": 20
+    },
+    {
+      "order": 110,
+      "top": "家纺布艺",
+      "leaf": "凉席凉枕",
+      "expected_count": 16
+    },
+    {
+      "order": 111,
+      "top": "家纺布艺",
+      "leaf": "其他家纺",
+      "expected_count": 76
+    },
+    {
+      "order": 112,
+      "top": "数码专区",
+      "leaf": "数据线",
+      "expected_count": 45
+    },
+    {
+      "order": 113,
+      "top": "数码专区",
+      "leaf": "充电套装",
+      "expected_count": 31
+    },
+    {
+      "order": 114,
+      "top": "数码专区",
+      "leaf": "耳机音响",
+      "expected_count": 46
+    },
+    {
+      "order": 115,
+      "top": "数码专区",
+      "leaf": "充电头",
+      "expected_count": 30
+    },
+    {
+      "order": 116,
+      "top": "数码专区",
+      "leaf": "手机膜",
+      "expected_count": 25
+    },
+    {
+      "order": 117,
+      "top": "数码专区",
+      "leaf": "充电宝",
+      "expected_count": 30
+    },
+    {
+      "order": 118,
+      "top": "数码专区",
+      "leaf": "手机配件",
+      "expected_count": 24
+    },
+    {
+      "order": 119,
+      "top": "数码专区",
+      "leaf": "手机壳",
+      "expected_count": 16
+    },
+    {
+      "order": 120,
+      "top": "数码专区",
+      "leaf": "支架自拍杆",
+      "expected_count": 4
+    },
+    {
+      "order": 121,
+      "top": "数码专区",
+      "leaf": "U盘内存卡",
+      "expected_count": 15
+    },
+    {
+      "order": 122,
+      "top": "数码专区",
+      "leaf": "摄像头",
+      "expected_count": 7
+    },
+    {
+      "order": 123,
+      "top": "数码专区",
+      "leaf": "键盘鼠标",
+      "expected_count": 38
+    },
+    {
+      "order": 124,
+      "top": "数码专区",
+      "leaf": "其他数码配件",
+      "expected_count": 150
+    },
+    {
+      "order": 125,
+      "top": "运动户外",
+      "leaf": "骑行用品",
+      "expected_count": 87
+    },
+    {
+      "order": 126,
+      "top": "运动户外",
+      "leaf": "游泳必备",
+      "expected_count": 115
+    },
+    {
+      "order": 127,
+      "top": "运动户外",
+      "leaf": "露营烧烤",
+      "expected_count": 100
+    },
+    {
+      "order": 128,
+      "top": "运动户外",
+      "leaf": "垂钓用品",
+      "expected_count": 50
+    },
+    {
+      "order": 129,
+      "top": "运动户外",
+      "leaf": "体育竞技",
+      "expected_count": 34
+    },
+    {
+      "order": 130,
+      "top": "运动户外",
+      "leaf": "瑜伽舞蹈",
+      "expected_count": 20
+    },
+    {
+      "order": 131,
+      "top": "运动户外",
+      "leaf": "健身器材",
+      "expected_count": 21
+    },
+    {
+      "order": 132,
+      "top": "运动户外",
+      "leaf": "护具",
+      "expected_count": 36
+    },
+    {
+      "order": 133,
+      "top": "运动户外",
+      "leaf": "其他运动",
+      "expected_count": 77
+    },
+    {
+      "order": 134,
+      "top": "母婴用品",
+      "leaf": "婴童尿裤",
+      "expected_count": 19
+    },
+    {
+      "order": 135,
+      "top": "母婴用品",
+      "leaf": "玩具",
+      "expected_count": 25
+    },
+    {
+      "order": 136,
+      "top": "母婴用品",
+      "leaf": "孕妈护理",
+      "expected_count": 13
+    },
+    {
+      "order": 137,
+      "top": "母婴用品",
+      "leaf": "婴儿洗浴",
+      "expected_count": 27
+    },
+    {
+      "order": 138,
+      "top": "母婴用品",
+      "leaf": "婴儿健康",
+      "expected_count": 18
+    },
+    {
+      "order": 139,
+      "top": "母婴用品",
+      "leaf": "月子用品",
+      "expected_count": 7
+    },
+    {
+      "order": 140,
+      "top": "母婴用品",
+      "leaf": "护理工具",
+      "expected_count": 11
+    },
+    {
+      "order": 141,
+      "top": "母婴用品",
+      "leaf": "其他母婴用品",
+      "expected_count": 89
+    },
+    {
+      "order": 142,
+      "top": "粮油调味",
+      "leaf": "米面馒头",
+      "expected_count": 66
+    },
+    {
+      "order": 143,
+      "top": "粮油调味",
+      "leaf": "下饭菜",
+      "expected_count": 29
+    },
+    {
+      "order": 144,
+      "top": "粮油调味",
+      "leaf": "糖盐酱醋",
+      "expected_count": 39
+    },
+    {
+      "order": 145,
+      "top": "粮油调味",
+      "leaf": "食用油",
+      "expected_count": 26
+    },
+    {
+      "order": 146,
+      "top": "粮油调味",
+      "leaf": "底料蘸料",
+      "expected_count": 48
+    },
+    {
+      "order": 147,
+      "top": "粮油调味",
+      "leaf": "腐乳酱料",
+      "expected_count": 40
+    },
+    {
+      "order": 148,
+      "top": "粮油调味",
+      "leaf": "其他调味",
+      "expected_count": 99
+    },
+    {
+      "order": 149,
+      "top": "萌宠专区",
+      "leaf": "猫粮",
+      "expected_count": 48
+    },
+    {
+      "order": 150,
+      "top": "萌宠专区",
+      "leaf": "猫砂",
+      "expected_count": 23
+    },
+    {
+      "order": 151,
+      "top": "萌宠专区",
+      "leaf": "猫零食",
+      "expected_count": 46
+    },
+    {
+      "order": 152,
+      "top": "萌宠专区",
+      "leaf": "猫窝狗厕",
+      "expected_count": 17
+    },
+    {
+      "order": 153,
+      "top": "萌宠专区",
+      "leaf": "美容清洁",
+      "expected_count": 16
+    },
+    {
+      "order": 154,
+      "top": "萌宠专区",
+      "leaf": "狗粮",
+      "expected_count": 15
+    },
+    {
+      "order": 155,
+      "top": "萌宠专区",
+      "leaf": "出行用品",
+      "expected_count": 13
+    },
+    {
+      "order": 156,
+      "top": "萌宠专区",
+      "leaf": "猫玩具",
+      "expected_count": 16
+    },
+    {
+      "order": 157,
+      "top": "萌宠专区",
+      "leaf": "狗零食",
+      "expected_count": 17
+    },
+    {
+      "order": 158,
+      "top": "萌宠专区",
+      "leaf": "宠物垫",
+      "expected_count": 3
+    },
+    {
+      "order": 159,
+      "top": "萌宠专区",
+      "leaf": "猫狗食具",
+      "expected_count": 7
+    },
+    {
+      "order": 160,
+      "top": "萌宠专区",
+      "leaf": "医疗用品",
+      "expected_count": 3
+    },
+    {
+      "order": 161,
+      "top": "萌宠专区",
+      "leaf": "其他宠物用品",
+      "expected_count": 52
+    },
+    {
+      "order": 162,
+      "top": "美妆护肤",
+      "leaf": "卸妆",
+      "expected_count": 48
+    },
+    {
+      "order": 163,
+      "top": "美妆护肤",
+      "leaf": "美妆工具",
+      "expected_count": 268
+    },
+    {
+      "order": 164,
+      "top": "美妆护肤",
+      "leaf": "发蜡发胶",
+      "expected_count": 23
+    },
+    {
+      "order": 165,
+      "top": "美妆护肤",
+      "leaf": "洁面",
+      "expected_count": 42
+    },
+    {
+      "order": 166,
+      "top": "美妆护肤",
+      "leaf": "化妆水棉",
+      "expected_count": 24
+    },
+    {
+      "order": 167,
+      "top": "美妆护肤",
+      "leaf": "面膜",
+      "expected_count": 60
+    },
+    {
+      "order": 168,
+      "top": "美妆护肤",
+      "leaf": "遮瑕粉底",
+      "expected_count": 21
+    },
+    {
+      "order": 169,
+      "top": "美妆护肤",
+      "leaf": "口红",
+      "expected_count": 9
+    },
+    {
+      "order": 170,
+      "top": "美妆护肤",
+      "leaf": "香水",
+      "expected_count": 4
+    },
+    {
+      "order": 171,
+      "top": "美妆护肤",
+      "leaf": "防晒止汗",
+      "expected_count": 25
+    },
+    {
+      "order": 172,
+      "top": "美妆护肤",
+      "leaf": "眼线眼影",
+      "expected_count": 9
+    },
+    {
+      "order": 173,
+      "top": "美妆护肤",
+      "leaf": "面霜眼霜",
+      "expected_count": 51
+    },
+    {
+      "order": 174,
+      "top": "美妆护肤",
+      "leaf": "定妆",
+      "expected_count": 23
+    },
+    {
+      "order": 175,
+      "top": "美妆护肤",
+      "leaf": "眉笔眉粉",
+      "expected_count": 5
+    },
+    {
+      "order": 176,
+      "top": "美妆护肤",
+      "leaf": "其他彩妆",
+      "expected_count": 29
+    },
+    {
+      "order": 177,
+      "top": "生活电器",
+      "leaf": "厨房电器",
+      "expected_count": 58
+    },
+    {
+      "order": 178,
+      "top": "生活电器",
+      "leaf": "个护电器",
+      "expected_count": 52
+    },
+    {
+      "order": 179,
+      "top": "生活电器",
+      "leaf": "电池遥控",
+      "expected_count": 46
+    },
+    {
+      "order": 180,
+      "top": "生活电器",
+      "leaf": "电子秤",
+      "expected_count": 6
+    },
+    {
+      "order": 181,
+      "top": "生活电器",
+      "leaf": "热水壶",
+      "expected_count": 5
+    },
+    {
+      "order": 182,
+      "top": "生活电器",
+      "leaf": "清洁电器",
+      "expected_count": 1
+    },
+    {
+      "order": 183,
+      "top": "生活电器",
+      "leaf": "母婴电器",
+      "expected_count": 4
+    },
+    {
+      "order": 184,
+      "top": "生活电器",
+      "leaf": "其他生活电器",
+      "expected_count": 88
+    }
+  ]
+}

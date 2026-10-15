@@ -1,157 +1,63 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-把 qnh_product_scan.py 的 CSV 写进 retail_price_snapshot 库。
+"""Load qnh_product_scan captures into retail_price_snapshot, transactionally."""
 
-一次采集 = store_snapshot 一行；每个商品在美团闪购 / 饿了么 / 京东到家各写一行
-fact_store_product_snapshot（列表卡片上三个渠道各有一个价格）。给了 --category
-时再写一级、二级两行类目。门店不存在就新建，存在就更新名称和平台 ID。
-
-默认只在事务里写一遍、打印核对结果后回滚，库里不留数据；确认无误后加 --commit。
-
-用法
-----
-  python3 qnh_load_db.py qnh_scan_20261008-180000.csv \\
-      --store-name "犀牛百货（长安店）" --warehouse-id 1137294 --tenant-id 1003684 \\
-      --category 休闲零食/薯片薯条 --platform-count 163 --device R28M31LJX0E
-  # 核对没问题后同样的参数加 --commit
-
-依赖：pymysql；数据库连接读 ~/.claude/skills/qnh-database/db_config.json
-"""
+from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 import uuid
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 import pymysql
 
+import qnh_capture_common as C
+
 DB_CONFIG = os.path.expanduser("~/.claude/skills/qnh-database/db_config.json")
 DATABASE = "retail_price_snapshot"
-
-# 后台采集的门店记在 qnh 渠道下；商品行按销售渠道拆开。顺序与 CSV 列一一对应。
-STORE_CHANNEL = "qnh"
-PRICE_CHANNELS = [("meituan", "美团闪购价"), ("eleme", "饿了么价"), ("jddj", "京东到家价")]
-
-BASE_COLUMNS = ["序号", "商品名称", "条码", "店内码", "货号", "状态", "视频时间点", "时刻"]
-CARD_COLUMNS = ["规格", "月售", "库存", "售罄", "活动品", "美团闪购价", "饿了么价",
-                "京东到家价", "采购价", "价格原文"]
-DETAIL_COLUMNS = ["开放平台标识", "SPU", "SKU", "重量", "采购价_详情", "采购单位_详情",
-                  "美团闪购状态", "美团闪购零售价", "美团闪购库存",
-                  "饿了么状态", "饿了么零售价", "饿了么库存",
-                  "京东到家状态", "京东到家零售价", "京东到家库存",
-                  "卖点", "可售日期", "礼袋", "是否力荐", "是否标品"]
-# 详情页的渠道状态 → 库的上架状态枚举
-LISTING_STATUS_MAP = {"已上架": "on_shelf", "已下架": "off_shelf", "未上线": "not_online"}
-# 「其他信息」的是非字段 → tinyint
-YES_NO_MAP = {"是": 1, "否": 0}
-IS_STANDARD_MAP = {"标品": 1, "非标品": 0, "自建": 0, "自建商品": 0}
-
-STAMP_PAT = re.compile(r"qnh_scan_(\d{8}-\d{6})")
-PURCHASE_PAT = re.compile(r"^(\d+(?:\.\d+)?)(?:/(\S+))?$")
-
-
-def die(msg):
-    sys.exit(f"错误：{msg}")
+STORE_CHANNEL = C.STORE_CHANNEL
+PRICE_CHANNELS = C.PRICE_CHANNELS
+BASE_COLUMNS = C.BASE_COLUMNS
+CARD_COLUMNS = C.CARD_COLUMNS
+DETAIL_COLUMNS = C.DETAIL_COLUMNS
+LISTING_STATUS_MAP = C.LISTING_STATUS_MAP
+YES_NO_MAP = C.YES_NO_MAP
+IS_STANDARD_MAP = C.IS_STANDARD_MAP
+PURCHASE_PAT = C.PURCHASE_PAT
+amount = C.amount
+field_value = C.field_value
+listing_key = C.listing_key
+source_prefix = C.source_prefix
+row_evidence = C.row_evidence
+row_times = C.row_times
+lower_bound_int = C.lower_bound_int
 
 
 class LoadError(Exception):
-    """已经安全回滚、应该用一行中文提示给人的入库错误。"""
+    pass
 
 
-def amount(text):
-    try:
-        return Decimal(text) if text else None
-    except InvalidOperation:
-        return None
-
-
-def field_value(text):
-    """详情页没填的字段显示「-」，入库记空。"""
-    return None if (text or "").strip() in {"", "-"} else text.strip()
-
-
-def listing_key(name, barcode, seen):
-    """
-    牵牛花 App 优先用列表「条码」（13 位 UPC 或 19 位后台内部码）做稳定定位键；
-    真正没有条码时才退回标准化商品名。同一采集版本、同一渠道内仍重复的，在
-    定位串末尾加 #2、#3，避免唯一键冲突。
-    """
-    if (barcode or "").strip():
-        base = "barcode:" + barcode.strip()
-    else:
-        base = "name:" + re.sub(r"\s+", " ", name.strip()) + "|"
-    seen[base] = seen.get(base, 0) + 1
-    key = base if seen[base] == 1 else f"{base}#{seen[base]}"
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+def die(message):
+    raise SystemExit(f"错误：{message}")
 
 
 def read_csv(path):
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
-        die(f"{path} 是空文件")
-    missing = [c for c in BASE_COLUMNS if c not in rows[0]]
+    rows, fields = C.read_csv_rows(path)
+    missing = [column for column in BASE_COLUMNS if column not in fields]
     if missing:
-        die(f"{path} 不是 qnh_product_scan.py 的输出（缺少列：{'、'.join(missing)}）")
-    missing_card = [c for c in CARD_COLUMNS if c not in rows[0]]
+        raise LoadError(f"{path} 不是 qnh_product_scan.py 输出（缺少：{'、'.join(missing)}）")
+    missing_card = [column for column in CARD_COLUMNS if column not in fields]
     if missing_card:
-        print(f"提示：旧版 CSV 缺少 {'、'.join(missing_card)}；对应字段会留空，其余字段照常入库")
-    if DETAIL_COLUMNS[0] not in rows[0]:
-        print("提示：旧版 CSV 缺少详情页字段（开放平台标识 / SPU / 渠道状态等）；这些列会留空")
+        print(f"提示：旧版 CSV 缺少 {'、'.join(missing_card)}；对应字段留空")
+    if DETAIL_COLUMNS[0] not in fields:
+        print("提示：旧版 CSV 缺少详情页字段；对应字段留空")
     return rows
 
 
-def source_prefix(path):
-    """CSV 与录像共用同名文件前缀；数据库记前缀即可同时定位两份证据。"""
-    return os.path.splitext(os.path.abspath(path))[0]
-
-
-def row_evidence(path, row):
-    """每个商品自己的证据前缀；续跑时可以指向上一轮的 CSV / 录像。"""
-    value = row.get("证据前缀") or source_prefix(path)
-    return value if os.path.isabs(value) else os.path.abspath(os.path.join(os.path.dirname(path), value))
-
-
-def row_times(path, rows):
-    """
-    新版 CSV 直接带完整 ISO 采集时间。旧版则从该行的证据前缀（续跑旧行）或
-    当前 CSV 文件名取日期，再和「时刻」组合；因此跨天和多轮续跑不会串日期。
-    """
-    out = []
-    for r in rows:
-        raw = r.get("采集时间")
-        if raw:
-            try:
-                out.append(datetime.fromisoformat(raw))
-                continue
-            except ValueError:
-                pass
-        m = STAMP_PAT.search(os.path.basename(row_evidence(path, r)))
-        try:
-            day = datetime.strptime(m.group(1), "%Y%m%d-%H%M%S").date() if m else None
-            out.append(datetime.combine(day, datetime.strptime(r["时刻"], "%H:%M:%S").time())
-                       if day else None)
-        except ValueError:
-            out.append(None)
-    return out
-
-
-def lower_bound_int(text):
-    """「1000+」取 1000；没有数字返回 None。"""
-    m = re.search(r"\d+", text or "")
-    return int(m.group()) if m else None
-
-
 def collector_version():
-    """Git 提交 + 脚本内容哈希；即使工作区未提交，也能准确追到实际采集版本。"""
     here = os.path.dirname(os.path.abspath(__file__))
     scanner = os.path.join(here, "qnh_product_scan.py")
     try:
@@ -160,243 +66,522 @@ def collector_version():
     except (OSError, subprocess.TimeoutExpired):
         rev = ""
     try:
-        with open(scanner, "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()[:12]
+        digest = C.sha256_file(scanner)[:12]
     except OSError:
         digest = "missing"
     return "qnh_product_scan.py" + (f"@{rev}" if rev else "") + f"+{digest}"
 
 
 def insert(cur, table, row):
-    cols = ", ".join(row)
-    cur.execute(f"INSERT INTO {table} ({cols}) VALUES ({', '.join(['%s'] * len(row))})",
+    columns = ", ".join(row)
+    cur.execute(f"INSERT INTO {table} ({columns}) VALUES ({', '.join(['%s'] * len(row))})",
                 list(row.values()))
 
 
-def exact_upc_matches(cur, rows):
-    """返回 UPC -> (标准 SPU, 标准 SKU)；只有唯一精确命中的 13 位 UPC 才自动匹配。"""
-    upcs = sorted({r["条码"] for r in rows if re.fullmatch(r"\d{13}", r["条码"] or "")})
-    if not upcs:
-        return {}
-    cur.execute(
-        "SELECT DISTINCT upc, spu, sku FROM qnh_data.goods_master_goods"
-        f" WHERE upc IN ({', '.join(['%s'] * len(upcs))})", upcs)
+def exact_upc_matches(cur, rows, chunk_size=500):
+    """UPC -> (SPU, SKU); only unique 13-digit exact master hits are eligible."""
+    upcs = sorted({C.text_value(row.get("条码")) for row in rows
+                   if __import__("re").fullmatch(r"\d{13}", C.text_value(row.get("条码")))})
     found = {}
-    for upc, spu, sku in cur.fetchall():
-        found.setdefault(upc, set()).add((spu, sku))
+    for start in range(0, len(upcs), chunk_size):
+        chunk = upcs[start:start + chunk_size]
+        cur.execute(
+            "SELECT DISTINCT upc, spu, sku FROM qnh_data.goods_master_goods"
+            f" WHERE upc IN ({', '.join(['%s'] * len(chunk))})", chunk)
+        for item in cur.fetchall():
+            found.setdefault(item["upc"], set()).add((item["spu"], item["sku"]))
     return {upc: next(iter(values)) for upc, values in found.items() if len(values) == 1}
 
 
-def main():
-    ap = argparse.ArgumentParser(description="qnh_product_scan.py 的 CSV 入库")
-    ap.add_argument("csv", help="qnh_product_scan.py 输出的 CSV")
-    ap.add_argument("--store-name", required=True, help="门店名称，如 犀牛百货（长安店）")
-    ap.add_argument("--warehouse-id", required=True, help="牵牛花仓库ID（记为平台门店 ID）")
-    ap.add_argument("--tenant-id", help="牵牛花租户ID")
-    ap.add_argument("--store-code", help="门店稳定编码，默认 qnh_<仓库ID>")
-    ap.add_argument("--role", choices=["competitor", "own"], default="competitor",
-                    help="门店角色，默认 competitor")
-    ap.add_argument("--category", help="本次采的类目，如 休闲零食/薯片薯条；不给表示没按类目采")
-    ap.add_argument("--platform-count", type=int,
-                    help="App 上该类目显示的商品数，如「薯片薯条（163）」里的 163")
-    ap.add_argument("--status", choices=["success", "partial"],
-                    help="采集结果；默认：商品数达到平台数且详情均完整才记 success，否则 partial")
-    ap.add_argument("--device", help="采集用的手机（ADB 序列号）")
-    ap.add_argument("--video", help="对应的录像；默认找 CSV 同名的 mp4 / mkv")
-    ap.add_argument("--commit", action="store_true", help="真正提交；不加则核对后回滚")
-    args = ap.parse_args()
+def _parse_dt(value, fallback):
+    if value:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+    return fallback
 
-    csv_path = os.path.abspath(args.csv)
-    rows = read_csv(csv_path)
-    times = row_times(csv_path, rows)
-    if not any(times):
-        die("CSV 里没有一行带有效的「时刻」")
-    started = min(t for t in times if t)
-    finished = max(t for t in times if t)
-    store_code = args.store_code or f"qnh_{args.warehouse_id}"
-    cat_l1, cat_l2 = (args.category.split("/", 1) + [None])[:2] if args.category else (None, None)
 
-    video = os.path.abspath(args.video) if args.video else None
-    if video and not os.path.exists(video):
-        die(f"录像不存在：{video}")
-    evidence_prefix = source_prefix(csv_path)
-    if not video:
-        video = next((evidence_prefix + ext for ext in (".mp4", ".mkv")
-                      if os.path.exists(evidence_prefix + ext)), None)
+def _db_config():
+    with open(DB_CONFIG, encoding="utf-8") as fh:
+        return json.load(fh)
 
-    n = len(rows)
-    state_counts = {}
-    for r in rows:
-        state_counts[r["状态"]] = state_counts.get(r["状态"], 0) + 1
-    incomplete = {k: v for k, v in state_counts.items() if k not in {"成功", "自建商品"}}
-    count_complete = args.platform_count is not None and n >= args.platform_count
-    status = args.status or ("success" if count_complete and not incomplete else "partial")
-    reasons = []
-    if args.platform_count is not None and n < args.platform_count:
-        reasons.append(f"只采了 {n} 个商品，App 显示 {args.platform_count} 个")
-    if incomplete:
-        reasons.append("详情字段未完整：" + "、".join(f"{k}{v}个" for k, v in incomplete.items()))
-    snapshot_id, batch_id = str(uuid.uuid4()), str(uuid.uuid4())
-    hour = started.replace(minute=0, second=0, microsecond=0)
 
-    cfg = json.load(open(DB_CONFIG))
-    conn = pymysql.connect(host=cfg["host"], port=cfg["port"], user=cfg["user"],
-                           password=cfg["password"], database=DATABASE,
-                           charset="utf8mb4", autocommit=False)
+def _open_connection():
+    cfg = _db_config()
+    return pymysql.connect(
+        host=cfg["host"], port=cfg["port"], user=cfg["user"], password=cfg["password"],
+        database=DATABASE, charset="utf8mb4", autocommit=False,
+        cursorclass=pymysql.cursors.DictCursor)
+
+
+def _manifest_context(manifest_path, *, expected_profile=None,
+                      profiles_file=C.DEFAULT_PROFILE_FILE):
+    report = C.validate_manifest(
+        manifest_path, require_complete=True, expected_profile=expected_profile)
+    if not report.ok:
+        raise LoadError(C.format_gate_report(report))
+    manifest = report.manifest
+    profile = manifest["profile"]
+    try:
+        configured_profile = C.load_profile(profile["name"], profiles_file)
+    except C.CaptureContractError as exc:
+        raise LoadError(f"manifest profile 无法从配置确认：{exc}") from exc
+    mismatches = C.profile_mismatches(profile, configured_profile)
+    if mismatches:
+        raise LoadError("manifest profile 与配置不一致：" + "；".join(mismatches))
+    scope = manifest["scope"]
+    artifacts = manifest["artifacts"]
+    return {
+        "manifest": manifest,
+        "gate": report,
+        "csv_path": os.path.abspath(artifacts["csv_path"]),
+        "store_name": profile["store_name"],
+        "warehouse_id": str(profile["warehouse_id"]),
+        "tenant_id": str(profile["tenant_id"]),
+        "store_code": profile["store_code"],
+        "role": profile["role"],
+        "category": scope.get("category"),
+        "segments": scope.get("segments"),
+        "platform_count": int(scope["expected_product_count"]),
+        "device": manifest.get("device_id"),
+        "status_override": "success" if manifest["state"] == "success" else "partial",
+        "snapshot_id": manifest["capture_id"],
+        "batch_id": manifest["batch_id"],
+        "manifest_path": os.path.abspath(manifest_path),
+        "manifest_sha256": report.manifest_sha256,
+        "csv_sha256": report.csv_sha256,
+    }
+
+
+def _existing_capture_result(conn, context):
+    if not context.get("manifest"):
+        return None
     cur = conn.cursor()
     try:
-        # 同一份 CSV / 录像只允许形成一个快照。兼容首版入库程序曾记过的
-        # 「CSV 文件」「录像文件」两种 evidence_uri 格式。
-        evidence_candidates = [evidence_prefix, csv_path]
-        if video:
-            evidence_candidates.append(video)
+        cur.execute("SELECT * FROM store_snapshot WHERE store_snapshot_id = %s",
+                    (context["snapshot_id"],))
+        row = cur.fetchone()
+        if not row:
+            return None
+        expected = {
+            "batch_id": context["batch_id"],
+            "snapshot_hour": context["snapshot_hour"],
+            "channel_code": STORE_CHANNEL,
+            "store_code": context["store_code"],
+            "store_name": context["store_name"],
+            "store_role": context["role"],
+            "source_store_id": context["warehouse_id"],
+            "status": context["status"],
+            "capture_method": "app_ui",
+            "collector_version": context["collector_version"],
+            "device_id": context["device"],
+            "started_at": context["started_at"],
+            "finished_at": context["finished_at"],
+            "covered_categories": context["covered_categories"],
+            "evidence_uri": context["evidence_prefix"],
+            "manifest_uri": context["manifest_path"],
+            "manifest_sha256": context["manifest_sha256"],
+            "csv_sha256": context["csv_sha256"],
+            "category_count": context["category_count"],
+            "expected_spu_count": context["platform_count"],
+            "captured_spu_count": context["row_count"],
+            "captured_sku_count": context["row_count"],
+            "raw_record_count": context["raw_record_count"],
+            "error_message": context["error_message"],
+        }
+        mismatches = [f"{key}: DB={row.get(key)!r} manifest={value!r}"
+                      for key, value in expected.items() if row.get(key) != value]
         cur.execute(
-            "SELECT store_snapshot_id FROM store_snapshot"
-            " WHERE channel_code = %s AND store_code = %s AND capture_method = 'app_ui'"
-            f" AND evidence_uri IN ({', '.join(['%s'] * len(evidence_candidates))}) LIMIT 1",
-            [STORE_CHANNEL, store_code, *evidence_candidates])
-        duplicate = cur.fetchone()
-        if duplicate:
-            raise LoadError(f"这份采集已经入库（store_snapshot_id={duplicate[0]}），已拒绝重复写入")
+            "SELECT store_name,store_role,source_store_id,source_tenant_id FROM dim_store"
+            " WHERE channel_code=%s AND store_code=%s",
+            (STORE_CHANNEL, context["store_code"]))
+        store = cur.fetchone()
+        expected_store = {
+            "store_name": context["store_name"],
+            "store_role": context["role"],
+            "source_store_id": context["warehouse_id"],
+            "source_tenant_id": context["tenant_id"],
+        }
+        if not store:
+            mismatches.append("dim_store 不存在")
+        else:
+            mismatches.extend(
+                f"dim_store.{key}: DB={store.get(key)!r} profile={value!r}"
+                for key, value in expected_store.items() if store.get(key) != value)
+        cur.execute("SELECT COUNT(*) AS n FROM fact_store_product_snapshot"
+                    " WHERE store_snapshot_id=%s", (context["snapshot_id"],))
+        fact_count = cur.fetchone()["n"]
+        if fact_count != context["fact_row_count"]:
+            mismatches.append(
+                f"事实表行数: DB={fact_count} expected={context['fact_row_count']}")
+        cur.execute("SELECT COUNT(*) AS n FROM fact_store_category_snapshot"
+                    " WHERE store_snapshot_id=%s", (context["snapshot_id"],))
+        category_rows = cur.fetchone()["n"]
+        expected_category_rows = context["category_count"] or 0
+        if category_rows != expected_category_rows:
+            mismatches.append(
+                f"类目表行数: DB={category_rows} expected={expected_category_rows}")
+        if mismatches:
+            raise LoadError("capture_id 已存在但内容不一致：" + "；".join(mismatches))
+        import qnh_validate_db as validator
+        validation = validator.validate_snapshot(
+            conn, context["csv_path"], context["snapshot_id"],
+            manifest_path=context["manifest_path"])
+        if not validation.ok:
+            raise LoadError("已存在 capture 校验失败：" + json.dumps(
+                validation.as_dict(), ensure_ascii=False))
+        return {
+            "ok": True,
+            "snapshot_id": context["snapshot_id"],
+            "batch_id": row["batch_id"],
+            "status": row["status"],
+            "rows": context["row_count"],
+            "fact_rows": context["fact_row_count"],
+            "new_matches": 0,
+            "committed": True,
+            "recovered": True,
+            "validation": validation.as_dict(),
+        }
+    finally:
+        cur.close()
 
-        cur.execute(
-            "INSERT INTO dim_store (channel_code, store_code, store_name, store_role,"
-            " source_store_id, source_tenant_id) VALUES (%s, %s, %s, %s, %s, %s)"
-            " ON DUPLICATE KEY UPDATE store_name = VALUES(store_name),"
-            " source_store_id = VALUES(source_store_id),"
-            " source_tenant_id = COALESCE(VALUES(source_tenant_id), source_tenant_id)",
-            (STORE_CHANNEL, store_code, args.store_name, args.role,
-             args.warehouse_id, args.tenant_id))
-        cur.execute("SELECT store_role FROM dim_store WHERE channel_code = %s AND store_code = %s",
-                    (STORE_CHANNEL, store_code))
-        if cur.fetchone()[0] != args.role:
-            raise LoadError(f"门店 {store_code} 在库里的角色和 --role {args.role} 不一致，没有写入")
 
-        insert(cur, "store_snapshot", dict(
-            store_snapshot_id=snapshot_id, batch_id=batch_id, snapshot_hour=hour,
-            channel_code=STORE_CHANNEL, store_code=store_code, store_name=args.store_name,
-            store_role=args.role, source_store_id=args.warehouse_id, status=status,
-            capture_method="app_ui", collector_version=collector_version(),
-            device_id=args.device, started_at=started, finished_at=finished,
-            covered_categories=args.category.replace("/", " > ") if args.category else None,
-            evidence_uri=evidence_prefix,
-            category_count=2 if cat_l2 else (1 if cat_l1 else None),
-            expected_spu_count=args.platform_count, captured_spu_count=n,
-            raw_record_count=n, error_message="；".join(reasons) or None))
+def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
+                 store_name=None, warehouse_id=None, tenant_id=None, store_code=None,
+                 role="competitor", category=None, platform_count=None,
+                 status_override=None, device=None, video=None, commit=False,
+                 expected_profile=None, profiles_file=C.DEFAULT_PROFILE_FILE,
+                 allow_legacy_partial_commit=False):
+    if manifest_path:
+        context = _manifest_context(
+            os.path.abspath(manifest_path), expected_profile=expected_profile,
+            profiles_file=profiles_file)
+    else:
+        if not csv_path or not store_name or not warehouse_id:
+            raise LoadError("直接 CSV 模式需要 csv、store_name、warehouse_id")
+        if commit:
+            if not allow_legacy_partial_commit:
+                raise LoadError(
+                    "直接 CSV 持久化仅用于显式旧版 partial：需加 --allow-legacy-partial-commit")
+            if status_override != "partial":
+                raise LoadError("直接 CSV 持久化必须显式传 --status partial")
+            if tenant_id is None or not store_code:
+                raise LoadError("直接 CSV 持久化必须显式提供 --tenant-id 和 --store-code")
+        context = {
+            "manifest": None,
+            "gate": None,
+            "csv_path": os.path.abspath(csv_path),
+            "store_name": store_name,
+            "warehouse_id": str(warehouse_id),
+            "tenant_id": str(tenant_id) if tenant_id is not None else None,
+            "store_code": store_code or f"qnh_{warehouse_id}",
+            "role": role,
+            "category": category,
+            "platform_count": platform_count,
+            "device": device,
+            "status_override": status_override,
+            "snapshot_id": str(uuid.uuid4()),
+            "batch_id": str(uuid.uuid4()),
+            "manifest_path": None,
+            "manifest_sha256": None,
+            "csv_sha256": None,
+        }
 
-        if cat_l1:
-            common = dict(store_snapshot_id=snapshot_id, batch_id=batch_id, snapshot_hour=hour,
-                          channel_code=STORE_CHANNEL, store_code=store_code)
-            insert(cur, "fact_store_category_snapshot", dict(
-                common, category_key=f"name:{cat_l1}", category_name=cat_l1, category_level=1,
-                platform_product_count=None if cat_l2 else args.platform_count,
-                captured_spu_count=None if cat_l2 else n))
-            if cat_l2:
+    rows = read_csv(context["csv_path"])
+    times = C.row_times(context["csv_path"], rows)
+    valid_times = [value for value in times if value]
+    if not valid_times:
+        raise LoadError("CSV 没有有效采集时间")
+    started, finished = min(valid_times), max(valid_times)
+    manifest = context.get("manifest") or {}
+    capture_meta = manifest.get("capture") or {}
+    started = _parse_dt(capture_meta.get("started_at"), started)
+    finished = _parse_dt(capture_meta.get("finished_at"), finished)
+
+    n = len(rows)
+    counts = C.status_counts(rows)
+    incomplete = {key: value for key, value in counts.items()
+                  if key not in C.COMPLETE_ROW_STATUSES}
+    count_complete = context["platform_count"] is not None and n >= int(context["platform_count"])
+    status = context["status_override"] or ("success" if count_complete and not incomplete else "partial")
+    reasons = []
+    if context["platform_count"] is not None and n < int(context["platform_count"]):
+        reasons.append(f"只采了 {n} 个商品，App 显示 {context['platform_count']} 个")
+    if incomplete:
+        reasons.append("详情字段未完整：" + "、".join(f"{key}{value}个" for key, value in incomplete.items()))
+
+    evidence_prefix = C.source_prefix(context["csv_path"])
+    video_path = os.path.abspath(video) if video else next(
+        (evidence_prefix + ext for ext in (".mp4", ".mkv")
+         if os.path.exists(evidence_prefix + ext)), None)
+    if video and not os.path.exists(video_path):
+        raise LoadError(f"录像不存在：{video_path}")
+    category_parts = (context["category"].split("/", 1) + [None])[:2] if context["category"] else (None, None)
+    segments = context.get("segments") or []
+    row_categories = (C.row_category_map(manifest, n) if manifest else
+                      [tuple(category_parts)] * n)
+    category_l1, category_l2 = category_parts
+    if segments:
+        top_names = list(dict.fromkeys(segment["top"] for segment in segments))
+        covered_categories = "|".join(top_names)
+        category_count = len(top_names) + sum(segment["leaf"] != segment["top"]
+                                               for segment in segments)
+    else:
+        covered_categories = context["category"].replace("/", " > ") if context["category"] else None
+        category_count = 2 if category_l2 else (1 if category_l1 else None)
+    hour = started.replace(minute=0, second=0, microsecond=0)
+    raw_record_count = ((manifest.get("scope") or {}).get("raw_segment_product_count", n)
+                        if manifest else n)
+    context.update({
+        "started_at": started,
+        "finished_at": finished,
+        "snapshot_hour": hour,
+        "status": status,
+        "collector_version": capture_meta.get("collector_version") or collector_version(),
+        "evidence_prefix": evidence_prefix,
+        "covered_categories": covered_categories,
+        "video_path": video_path,
+        "row_count": n,
+        "raw_record_count": raw_record_count,
+        "fact_row_count": n * len(PRICE_CHANNELS),
+        "category_count": category_count,
+        "error_message": "；".join(reasons) or None,
+    })
+
+    conn = _open_connection()
+    try:
+        recovered = _existing_capture_result(conn, context)
+        if recovered:
+            conn.rollback()
+            return recovered
+        cur = conn.cursor()
+        try:
+            evidence_candidates = [evidence_prefix, context["csv_path"]]
+            if video_path:
+                evidence_candidates.append(video_path)
+            cur.execute(
+                "SELECT store_snapshot_id FROM store_snapshot"
+                " WHERE channel_code=%s AND store_code=%s AND capture_method='app_ui'"
+                f" AND evidence_uri IN ({', '.join(['%s'] * len(evidence_candidates))}) LIMIT 1",
+                [STORE_CHANNEL, context["store_code"], *evidence_candidates])
+            duplicate = cur.fetchone()
+            if duplicate:
+                raise LoadError(f"这份证据已经入库（{duplicate['store_snapshot_id']}）")
+
+            cur.execute(
+                "SELECT store_name,store_role,source_store_id,source_tenant_id"
+                " FROM dim_store WHERE channel_code=%s AND store_code=%s",
+                (STORE_CHANNEL, context["store_code"]))
+            existing_store = cur.fetchone()
+            expected_store = {
+                "store_name": context["store_name"],
+                "store_role": context["role"],
+                "source_store_id": context["warehouse_id"],
+                "source_tenant_id": context["tenant_id"],
+            }
+            if existing_store:
+                store_mismatches = [
+                    f"{key}: DB={existing_store.get(key)!r} profile={value!r}"
+                    for key, value in expected_store.items()
+                    if existing_store.get(key) != value
+                ]
+                if store_mismatches:
+                    raise LoadError("门店维表与 profile 不一致：" + "；".join(store_mismatches))
+            else:
+                cur.execute(
+                    "INSERT INTO dim_store (channel_code,store_code,store_name,store_role,"
+                    " source_store_id,source_tenant_id) VALUES (%s,%s,%s,%s,%s,%s)",
+                    (STORE_CHANNEL, context["store_code"], context["store_name"],
+                     context["role"], context["warehouse_id"], context["tenant_id"]))
+
+            insert(cur, "store_snapshot", dict(
+                store_snapshot_id=context["snapshot_id"], batch_id=context["batch_id"],
+                snapshot_hour=hour, channel_code=STORE_CHANNEL,
+                store_code=context["store_code"], store_name=context["store_name"],
+                store_role=context["role"], source_store_id=context["warehouse_id"],
+                status=status, capture_method="app_ui",
+                collector_version=context["collector_version"],
+                device_id=context["device"], started_at=started, finished_at=finished,
+                covered_categories=context["covered_categories"],
+                evidence_uri=evidence_prefix,
+                manifest_uri=context["manifest_path"],
+                manifest_sha256=context["manifest_sha256"], csv_sha256=context["csv_sha256"],
+                category_count=category_count,
+                expected_spu_count=context["platform_count"], captured_spu_count=n,
+                captured_sku_count=n, raw_record_count=raw_record_count,
+                error_message=context["error_message"]))
+
+            if segments:
+                common = dict(store_snapshot_id=context["snapshot_id"],
+                              batch_id=context["batch_id"], snapshot_hour=hour,
+                              channel_code=STORE_CHANNEL, store_code=context["store_code"])
+                top_order = {}
+                for segment in segments:
+                    top = segment["top"]
+                    if top not in top_order:
+                        top_order[top] = len(top_order) + 1
+                        insert(cur, "fact_store_category_snapshot", dict(
+                            common, category_key=f"name:{top}", category_name=top,
+                            category_level=1, category_order=top_order[top],
+                            platform_product_count=sum(item["expected_count"] for item in segments
+                                                       if item["top"] == top),
+                            captured_spu_count=sum(item["captured_count"] for item in segments
+                                                   if item["top"] == top)))
+                    if segment["leaf"] != top:
+                        insert(cur, "fact_store_category_snapshot", dict(
+                            common, category_key=f"name:{top}/{segment['leaf']}",
+                            category_name=segment["leaf"], parent_category_key=f"name:{top}",
+                            category_level=2,
+                            platform_product_count=segment["expected_count"],
+                            captured_spu_count=segment["captured_count"]))
+            elif category_l1:
+                common = dict(store_snapshot_id=context["snapshot_id"], batch_id=context["batch_id"],
+                              snapshot_hour=hour, channel_code=STORE_CHANNEL,
+                              store_code=context["store_code"])
                 insert(cur, "fact_store_category_snapshot", dict(
-                    common, category_key=f"name:{cat_l1}/{cat_l2}", category_name=cat_l2,
-                    parent_category_key=f"name:{cat_l1}", category_level=2,
-                    platform_product_count=args.platform_count, captured_spu_count=n))
+                    common, category_key=f"name:{category_l1}", category_name=category_l1,
+                    category_level=1,
+                    platform_product_count=None if category_l2 else context["platform_count"],
+                    captured_spu_count=None if category_l2 else n))
+                if category_l2:
+                    insert(cur, "fact_store_category_snapshot", dict(
+                        common, category_key=f"name:{category_l1}/{category_l2}",
+                        category_name=category_l2, parent_category_key=f"name:{category_l1}",
+                        category_level=2, platform_product_count=context["platform_count"],
+                        captured_spu_count=n))
 
-        seen = {ch: {} for ch, _ in PRICE_CHANNELS}
-        master_matches = exact_upc_matches(cur, rows)
-        has_detail = DETAIL_COLUMNS[0] in rows[0]
-        written = matched = 0
-        for r, t in zip(rows, times):
-            purchase = r.get("采购价", "")
-            pm = PURCHASE_PAT.match(purchase)
-            month = r.get("月售", "")
-            sold_out = r.get("售罄", "")
-            stock = r.get("库存", "")
-            # 列表上的库存是门店库存，三个渠道共用；表注释约定显示「售罄」记 0
-            stock_qty = amount(stock) if stock else (Decimal(0) if sold_out == "是" else None)
-            # 采购价：详情页优先（¥5.27、单位可能是「单品」），没有退回列表卡片
-            detail_buy = r.get("采购价_详情", "") if has_detail else ""
-            detail_unit = r.get("采购单位_详情", "") if has_detail else ""
-            purchase_amount = amount(detail_buy) or (amount(pm.group(1)) if pm else None)
-            purchase_unit = detail_unit or (pm.group(2) if pm else None)
-            for ch, col in PRICE_CHANNELS:
-                key = listing_key(r["商品名称"], r["条码"], seen[ch])
-                # 详情页的字段更权威（渠道、状态都有标签）；没有详情时退回列表卡片
-                detail_status = r.get(ch + "状态", "") if has_detail else ""
-                detail_price = r.get(ch + "零售价", "") if has_detail else ""
-                detail_stock = r.get(ch + "库存", "") if has_detail else ""
-                # 详情有渠道库存用渠道的，没有用门店级；详情的「售罄」按表注释约定记 0
-                channel_stock = (Decimal(0) if detail_stock in {"售罄", "已售罄"}
-                                 else amount(detail_stock)) if detail_stock else stock_qty
-                insert(cur, "fact_store_product_snapshot", dict(
-                    batch_id=batch_id, store_snapshot_id=snapshot_id, snapshot_hour=hour,
-                    collected_at=t, capture_method="app_ui", channel_code=ch,
-                    store_code=store_code, store_name=args.store_name, store_role=args.role,
-                    category_name=cat_l1, sub_category_name=cat_l2,
-                    listing_key=key,
-                    product_name=r["商品名称"].strip(), spec_name=r.get("规格") or None,
-                    upc=r["条码"] or None, store_inner_code=field_value(r["店内码"]),
-                    article_no=field_value(r["货号"]),
-                    open_platform_id=r.get("开放平台标识") or None,
-                    source_spu_id=r.get("SPU") or None,
-                    source_sku_id=r.get("SKU") or None,
-                    weight_text=r.get("重量") or None,
-                    front_display_price_amount=amount(detail_price) or amount(r.get(col, "")),
-                    purchase_price_amount=purchase_amount,
-                    purchase_price_unit=purchase_unit,
-                    purchase_price_text=(detail_buy or purchase) or None,
-                    month_sales_text=f"月售{month}" if month else None,
-                    month_sales_qty=lower_bound_int(month),
-                    sale_status={"是": "out_of_stock", "否": "available"}.get(sold_out, "unknown"),
-                    stock_text=("已售罄" if sold_out == "是" else stock) or None,
-                    stock_quantity=channel_stock,
-                    is_promo_item={"是": 1, "否": 0}.get(r.get("活动品", "")),
-                    listing_status=LISTING_STATUS_MAP.get(detail_status),
-                    selling_points=r.get("卖点") or None,
-                    sellable_date_text=r.get("可售日期") or None,
-                    gift_bag_text=r.get("礼袋") or None,
-                    is_recommended=YES_NO_MAP.get(r.get("是否力荐", "")),
-                    is_standard=IS_STANDARD_MAP.get(r.get("是否标品", "")),
-                    # 三个渠道价没拆出来时（价格行数不对），原文留在这里备查
-                    other_text=(r.get("价格原文") or None) if not r.get(col) else None,
-                    evidence_uri=row_evidence(csv_path, r),
-                    evidence_video_time=r["视频时间点"] or None))
-                written += 1
-                standard = master_matches.get(r["条码"])
-                if standard:
-                    cur.execute(
-                        "INSERT IGNORE INTO map_source_sku_standard"
-                        " (channel_code, listing_key, listing_type, product_name, spec_name, upc,"
-                        " standard_spu_id, standard_sku_id, match_status, match_method, match_score, remark)"
-                        " VALUES (%s, %s, 'barcode', %s, %s, %s, %s, %s, 'matched', 'upc', 1.0000, %s)",
-                        (ch, key, r["商品名称"].strip(), r.get("规格") or None, r["条码"],
-                         standard[0], standard[1], "牵牛花采集：13位 UPC 精确匹配"))
-                    matched += cur.rowcount
+            seen = {channel: {} for channel, _ in PRICE_CHANNELS}
+            master_matches = exact_upc_matches(cur, rows)
+            written = matched = 0
+            for source, collected_at, row_category in zip(rows, times, row_categories):
+                row_category_l1, row_category_l2 = row_category
+                for channel, price_column in PRICE_CHANNELS:
+                    key = listing_key(source["商品名称"], source.get("条码"), seen[channel])
+                    fact_fields = C.fact_fields_from_csv(
+                        source, channel, price_column, context["csv_path"])
+                    insert(cur, "fact_store_product_snapshot", dict(
+                        batch_id=context["batch_id"], store_snapshot_id=context["snapshot_id"],
+                        snapshot_hour=hour, collected_at=collected_at, capture_method="app_ui",
+                        channel_code=channel, store_code=context["store_code"],
+                        store_name=context["store_name"], store_role=context["role"],
+                        category_name=row_category_l1, sub_category_name=row_category_l2,
+                        listing_key=key, **fact_fields))
+                    written += 1
+                    standard = master_matches.get(C.text_value(source.get("条码")))
+                    if standard:
+                        cur.execute(
+                            "INSERT IGNORE INTO map_source_sku_standard"
+                            " (channel_code,listing_key,listing_type,product_name,spec_name,upc,"
+                            " standard_spu_id,standard_sku_id,match_status,match_method,match_score,remark)"
+                            " VALUES (%s,%s,'barcode',%s,%s,%s,%s,%s,'matched','upc',1.0000,%s)",
+                            (channel, key, C.text_value(source.get("商品名称")),
+                             field_value(source.get("规格")), C.text_value(source.get("条码")),
+                             standard[0], standard[1],
+                             "牵牛花采集：13位 UPC 精确匹配"))
+                        matched += cur.rowcount
+        finally:
+            cur.close()
 
-        print(f"门店：{args.store_name}（{STORE_CHANNEL}/{store_code}，{args.role}）")
-        print(f"采集版本：{snapshot_id}  状态 {status}  {started:%Y-%m-%d %H:%M:%S} ~ {finished:%H:%M:%S}")
-        print(f"商品：{n} 个 × {len(PRICE_CHANNELS)} 个渠道 = {written} 行")
-        cur.execute("SELECT channel_code, COUNT(*), COUNT(front_display_price_amount),"
-                    " COUNT(store_inner_code), COUNT(purchase_price_amount),"
-                    " SUM(sale_status = 'out_of_stock')"
-                    " FROM fact_store_product_snapshot WHERE store_snapshot_id = %s"
-                    " GROUP BY channel_code", (snapshot_id,))
-        print("  渠道        行数  有价格  有店内码  有采购价  售罄")
-        for ch, cnt, price, code, buy, out in cur.fetchall():
-            print(f"  {ch:<10}{cnt:>6}{price:>8}{code:>10}{buy:>10}{int(out or 0):>6}")
-        cur.execute("SELECT COUNT(*) FROM v_store_product_latest WHERE store_code = %s",
-                    (store_code,))
-        print(f"「最新价格」视图里这家店：{cur.fetchone()[0]} 行")
+        import qnh_validate_db as validator
+        validation = validator.validate_snapshot(
+            conn, context["csv_path"], context["snapshot_id"],
+            manifest_path=context["manifest_path"])
+        if not validation.ok:
+            raise LoadError("事务内逐字段校验失败：" + json.dumps(
+                validation.as_dict(), ensure_ascii=False))
 
-        if args.commit:
+        result = {
+            "ok": True,
+            "snapshot_id": context["snapshot_id"],
+            "batch_id": context["batch_id"],
+            "status": status,
+            "rows": n,
+            "fact_rows": written,
+            "new_matches": matched,
+            "committed": bool(commit),
+            "recovered": False,
+            "validation": validation.as_dict(),
+        }
+        if commit:
             conn.commit()
-            print("已提交。")
         else:
             conn.rollback()
-            print("核对模式：已回滚，库里没有留下数据。确认无误后加 --commit 再跑一次。")
-    except LoadError as e:
-        conn.rollback()
-        die(str(e))
+        return result
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def _print_result(result):
+    state = "已提交" if result["committed"] else "核对模式：已回滚"
+    if result.get("recovered"):
+        state = "已存在且校验一致（幂等恢复）"
+    print(f"snapshot_id={result['snapshot_id']}  status={result['status']}")
+    print(f"商品 {result.get('rows')} 个，事实表 {result.get('fact_rows', '既有')} 行，"
+          f"新增精确匹配 {result.get('new_matches', '既有')}；{state}")
+    print(f"事务校验：{'PASS' if result['validation']['ok'] else 'FAIL'}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="牵牛花 CSV 事务入库")
+    parser.add_argument("csv", nargs="?", help="CSV（manifest 模式可省略）")
+    parser.add_argument("--manifest", help="finalized manifest")
+    parser.add_argument("--profiles-file", default=C.DEFAULT_PROFILE_FILE,
+                        help="manifest profile 的可信配置文件")
+    parser.add_argument("--require-complete", action="store_true",
+                        help="兼容选项；manifest 模式始终执行严格 full gate")
+    parser.add_argument("--store-name")
+    parser.add_argument("--warehouse-id")
+    parser.add_argument("--tenant-id")
+    parser.add_argument("--store-code")
+    parser.add_argument("--role", choices=["competitor", "own"], default="competitor")
+    parser.add_argument("--category")
+    parser.add_argument("--platform-count", type=int)
+    parser.add_argument("--status", dest="status_override", choices=["success", "partial"])
+    parser.add_argument("--device")
+    parser.add_argument("--video")
+    parser.add_argument("--commit", action="store_true")
+    parser.add_argument("--allow-legacy-partial-commit", action="store_true",
+                        help="仅旧 CSV 手工 partial；manifest 正式路径不需要")
+    parser.add_argument("--result-json", help="原子写机器结果")
+    parser.add_argument("--json", action="store_true", help="末行输出机器 JSON")
+    args = parser.parse_args()
+    if args.commit and not args.result_json:
+        die("--commit 必须同时提供 --result-json，确保提交结果可恢复")
+    if args.commit:
+        C.atomic_write_json(args.result_json, {
+            "ok": False,
+            "state": "commit_pending",
+            "committed": None,
+            "manifest_path": os.path.abspath(args.manifest) if args.manifest else None,
+            "csv_path": os.path.abspath(args.csv) if args.csv else None,
+        })
+    try:
+        result = load_capture(
+            csv_path=args.csv, manifest_path=args.manifest,
+            require_complete=args.require_complete,
+            store_name=args.store_name, warehouse_id=args.warehouse_id,
+            tenant_id=args.tenant_id, store_code=args.store_code, role=args.role,
+            category=args.category, platform_count=args.platform_count,
+            status_override=args.status_override, device=args.device, video=args.video,
+            commit=args.commit, profiles_file=os.path.abspath(args.profiles_file),
+            allow_legacy_partial_commit=args.allow_legacy_partial_commit)
+    except (LoadError, C.CaptureContractError) as exc:
+        die(str(exc))
+    _print_result(result)
+    if args.result_json:
+        try:
+            C.atomic_write_json(args.result_json, result)
+        except OSError as exc:
+            if args.commit:
+                die(f"提交已完成，但最终 result 写入失败；commit_pending 仍在"
+                    f" {os.path.abspath(args.result_json)}：{exc}")
+            raise
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
 if __name__ == "__main__":
