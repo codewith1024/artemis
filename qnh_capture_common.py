@@ -393,13 +393,17 @@ def carry_price_key(text):
     """列表卡片价格文本的规范化比较键（每日增量指纹用）。
 
     数值价格 → 无指数、去尾零的十进制字符串（"45.00" 与 DB 45.0000 同键）；
+    带单位后缀的采购价（"5.00/袋"）只比较金额部分（PURCHASE_PAT 同款解析）；
     非数值（如「无数据」）保留原文；空值 → None。
     """
-    value = nonnegative_amount(text)
-    if value is not None:
-        return format(value.normalize(), "f")
     value = text_value(text)
-    return value or None
+    if not value:
+        return None
+    match = PURCHASE_PAT.match(value)
+    amount = Decimal(match.group(1)) if match else nonnegative_amount(value)
+    if amount is not None:
+        return format(amount.normalize(), "f")
+    return value
 
 
 def row_category_map(manifest: dict, row_count: int) -> list[tuple[str | None, str | None]]:
