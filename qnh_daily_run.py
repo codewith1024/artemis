@@ -72,6 +72,8 @@ def main():
                         help="跳过基线导出（复用既有 carry_baseline.json，调试用）")
     parser.add_argument("--no-commit", action="store_true",
                         help="聚合后 dry-run 回滚，不提交（调试用）")
+    parser.add_argument("--no-dismiss-dialogs", action="store_true",
+                        help="不自动关闭店铺订单弹窗（默认自动关闭，业务已授权）")
     args = parser.parse_args()
     out_dir = os.path.join(ROOT, "qnh_daily", args.date)
     os.makedirs(out_dir, exist_ok=True)
@@ -109,7 +111,8 @@ def main():
         code = run([sys.executable, os.path.join(ROOT, "qnh_category_pipeline.py"),
                     "--out-dir", out_dir,
                     "--carry-baseline", baseline_path,
-                    *([] if args.no_commit else ["--commit"])],
+                    *([] if args.no_commit else ["--commit"]),
+                    *([] if args.no_dismiss_dialogs else ["--dismiss-order-dialogs"])],
                    log_fh)
         if code != 0:
             write_status(out_dir, state=FAILED, stage="capture",
