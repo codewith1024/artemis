@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>retail_price_snapshot 表结构说明</title>
+<style>
+  :root { --ink:#1f2328; --sub:#59636e; --line:#e3e6ea; --soft:#f6f8fa; --accent:#0b6bcb; --tag:#eef4fb; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#fff; color:var(--ink);
+         font: 15px/1.75 -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 22px 64px; }
+  h1 { font-size: 24px; margin: 0 0 6px; }
+  .meta { color: var(--sub); font-size: 13px; margin-bottom: 28px; }
+  .meta code { font-size: 12.5px; }
+  h2 { font-size: 17px; margin: 34px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  p { margin: 8px 0; }
+  .lead { font-size: 16px; background: var(--soft); border-left: 3px solid var(--accent);
+          padding: 12px 16px; border-radius: 4px; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px;
+         background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+
+  /* 关系图 */
+  .map { font-size: 14px; display: grid; gap: 10px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .box { border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; background: #fff; white-space: nowrap; }
+  .box.main { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .box.view { border-style: dashed; }
+  .arrow { color: var(--sub); }
+  .indent { padding-left: 34px; }
+  .indent2 { padding-left: 68px; }
+
+  /* 表卡片 */
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+  .card.core { border-color: var(--accent); }
+  .card h3 { font-size: 15px; margin: 0 0 4px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .card h3 code { font-size: 12.5px; color: var(--sub); background: none; padding: 0; }
+  .card p { margin: 4px 0; }
+  .card .row1 { color: var(--sub); font-size: 13.5px; }
+  .tag { display: inline-block; font-size: 12px; background: var(--tag); color: var(--accent);
+         padding: 0 7px; border-radius: 10px; margin-left: 2px; }
+
+  pre { background: var(--soft); border-radius: 8px; padding: 12px 14px; overflow-x: auto;
+        font: 13px/1.6 "SF Mono", Menlo, Consolas, monospace; margin: 8px 0; }
+  .note { color: var(--sub); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>retail_price_snapshot 表结构说明</h1>
+<div class="meta">
+  服务器 <code>192.168.100.200:3306</code>（和 qnh_data 同一台，需公司内网）· 库名 <code>retail_price_snapshot</code> · 更新于 2026-10-09
+</div>
+
+<p class="lead">一句话：记录<b>我们和竞对门店</b>在美团、饿了么、京东上，<b>某个时间点在卖什么、卖多少钱</b>，用来比价、盯竞对动作。</p>
+
+<h2>数据从哪来</h2>
+<ul>
+  <li><b>美团外卖页面</b>：用手机滚动浏览门店页面采集，拿到的是顾客看到的价格、优惠、月售。</li>
+  <li><b>牵牛花商家后台</b>：除了价格，还能拿到采购价、店内码 / 货号，以及每个渠道的上下架状态和库存。</li>
+</ul>
+
+<h2>表之间的关系</h2>
+<div class="map">
+  <div class="row"><span class="box">门店</span><span class="arrow">—</span><span class="box">竞对关系</span><span class="note">谁对标谁</span></div>
+  <div class="row indent"><span class="arrow">└</span><span class="box">采集记录</span><span class="note">每采一次一行</span></div>
+  <div class="row indent2"><span class="arrow">├</span><span class="box">类目</span></div>
+  <div class="row indent2"><span class="arrow">├</span><span class="box main">商品</span><span class="arrow">—</span><span class="box">商品匹配</span><span class="note">对应我们哪个商品</span></div>
+  <div class="row indent2"><span class="arrow">└</span><span class="box">优惠</span></div>
+  <div class="row"><span class="box view">最新价格（视图）</span><span class="note">日常查价用这个</span></div>
+</div>
+
+<h2>7 张表 + 1 个视图</h2>
+
+<div class="card">
+  <h3>门店 <code>dim_store</code></h3>
+  <p>每家店一行，我方和竞对都在这。<code>store_code</code> 是我们给每家店定的固定编号，其他表都靠它关联；<code>store_role</code> 区分我方（own）和竞对（competitor）。</p>
+</div>
+
+<div class="card">
+  <h3>竞对关系 <code>dim_store_competitor_rel</code></h3>
+  <p>我方门店和竞对门店的对应关系，一对一行。一家竞对可以同时对标我们好几家店，反过来也一样。还记了两店距离、主要 / 次要竞对。</p>
+</div>
+
+<div class="card">
+  <h3>采集记录 <code>store_snapshot</code></h3>
+  <p>每采集一次一行：什么时候、用什么方式、成没成功，以及当时门店的起送价、配送费、评分、配送时长。截图和录像不进库，存放位置记在这里；牵牛花完整采集还记录最终 manifest 与 CSV 的 SHA-256，既能审计原始证据，也能防止同一份采集重复入库。</p>
+</div>
+
+<div class="card">
+  <h3>类目 <code>fact_store_category_snapshot</code></h3>
+  <p>每次采集时门店的分类树，一个分类一行，带分类下的商品数。</p>
+</div>
+
+<div class="card core">
+  <h3>商品 <code>fact_store_product_snapshot</code> <span class="tag">核心</span></h3>
+  <p>一次采集 × 一个渠道 × 一个商品 = 一行。价格（售价、到手价、原价、多件价）、月售、库存、规格、条码都在这。</p>
+  <p class="row1">从牵牛花后台采的商品，还会有采购价、店内码 / 货号、渠道上下架状态。这些列在字段注释里标了「[后台]」，其他来源的数据这几列是空的。</p>
+</div>
+
+<div class="card">
+  <h3>优惠 <code>fact_store_promotion_snapshot</code></h3>
+  <p>门店的满减、新客立减、配送费优惠，以及各种商品券、品牌券，一条一行。券带 ID 和有效期。</p>
+</div>
+
+<div class="card">
+  <h3>商品匹配 <code>map_source_sku_standard</code></h3>
+  <p>竞对的商品对应我们 qnh_data 商品主档里的哪个商品（按条码、名称或人工确认）。比价就靠这张表。</p>
+</div>
+
+<div class="card">
+  <h3>最新价格 <code>v_store_product_latest</code> <span class="tag">视图</span></h3>
+  <p>每家店、每个渠道、每个商品只留最新的一条。<b>连续 7 天没再采到的商品当作已下架，不显示。</b>日常查价直接查这个就行。</p>
+</div>
+
+<h2>几个约定</h2>
+<ul>
+  <li>渠道：<code>meituan</code> 美团、<code>eleme</code> 饿了么、<code>jddj</code> 京东到家；<code>qnh</code> 表示牵牛花后台。商品表里记的始终是具体的销售渠道。</li>
+  <li>时间都是北京时间。</li>
+  <li>每个字段是什么意思，都写在数据库的字段注释里，用 Navicat / DBeaver 打开表结构就能看到。</li>
+</ul>
+
+<h2>牵牛花采集入库</h2>
+<p>正式流程使用固定门店 profile，依次完成 App 采集、完整性门禁、事务内逐字段校验和重连复核。默认只验证后回滚，不会留下数据库记录：</p>
+<pre>python3 qnh_capture_pipeline.py --profile xiniu-changan</pre>
+<p>确认 dry-run 报告后，使用同一份不可变 manifest 提交，无需重新采集：</p>
+<pre>python3 qnh_capture_pipeline.py --profile xiniu-changan \
+  --from-manifest /path/to/qnh_scan_YYYYMMDD-HHMMSS.manifest.json \
+  --commit</pre>
+<p class="note">数量不符、详情缺失、CSV 被改动或采集中断都会在连接数据库前失败；只有显式 <code>--commit</code> 才会持久化。</p>
+
+<h2>查一下试试</h2>
+<p class="note">某家竞对门店在美团上现在的价格：</p>
+<pre>SELECT product_name AS 商品, spec_name AS 规格,
+       front_display_price_amount AS 售价, month_sales_qty AS 月售,
+       snapshot_hour AS 采集时间
+FROM retail_price_snapshot.v_store_product_latest
+WHERE store_name LIKE '%犀牛百货%' AND channel_code = 'meituan';</pre>
+
+</main>
+</body>
+</html>

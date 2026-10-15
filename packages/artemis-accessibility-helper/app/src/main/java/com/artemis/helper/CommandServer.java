@@ -24,7 +24,8 @@ import java.util.concurrent.Executors;
  * Multi-threaded command server bound strictly to loopback (127.0.0.1:18888).
  *
  * Protocols:
- * - HTTP (/ping, /dump, /dump_xml, /hierarchy.xml, /snapshot, /action)
+ * - HTTP (/ping, /dump, /dump_xml, /hierarchy.xml, /snapshot, /has_text,
+ *   /has_any_text, /action)
  * - Line-delimited JSON-RPC over a raw TCP socket
  *
  * Every endpoint except {@code /ping} requires the session token the host pushed
@@ -239,6 +240,12 @@ public class CommandServer extends Thread {
             } else if (path.equals("/dump") || path.equals("/hierarchy")) {
                 HierarchyDumper.DumpOptions options = HierarchyDumper.DumpOptions.forDump().apply(query);
                 sendJson(output, 200, HierarchyDumper.dump(service, options).toString());
+            } else if (path.equals("/has_text")) {
+                sendJson(output, 200,
+                        HierarchyDumper.findText(service, query.get("pattern")).toString());
+            } else if (path.equals("/has_any_text")) {
+                sendJson(output, 200,
+                        HierarchyDumper.findAnyText(service, query.get("texts")).toString());
             } else if (path.equals("/action") || path.equals("/rpc")) {
                 JSONObject json = body.isEmpty() ? new JSONObject() : new JSONObject(body);
                 JSONObject resp = executeCommand(json.optString("cmd", ""), json);
@@ -345,6 +352,14 @@ public class CommandServer extends Thread {
                     float y2 = (float) params.optDouble("y2", -1.0);
                     long dur = params.optLong("duration", 300L);
                     resp.put("success", GestureController.swipe(service, x1, y1, x2, y2, dur, 3000L));
+                    break;
+                case "scroll_at":
+                    float sx = (float) params.optDouble("x", -1.0);
+                    float sy = (float) params.optDouble("y", -1.0);
+                    String direction = params.optString("direction", "forward");
+                    resp.put("success", sx >= 0 && sy >= 0
+                            && GestureController.scrollAt(service, sx, sy,
+                            !"backward".equalsIgnoreCase(direction)));
                     break;
                 case "type":
                     String text = params.optString("text", "");

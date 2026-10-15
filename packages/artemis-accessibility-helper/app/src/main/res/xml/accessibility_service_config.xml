@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- accessibilityEventTypes and notificationTimeout mirror ArtemisAccessibilityService.EVENT_TYPES
+     and onServiceConnected: the node cache is only kept current if these events reach the service. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged|typeViewScrolled|typeViewTextChanged|typeViewTextSelectionChanged|typeViewSelected|typeViewClicked|typeViewFocused|typeViewAccessibilityFocused|typeViewAccessibilityFocusCleared"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:notificationTimeout="100"
+    android:notificationTimeout="0"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"

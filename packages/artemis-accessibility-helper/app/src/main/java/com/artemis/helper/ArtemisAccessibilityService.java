@@ -19,14 +19,44 @@ import android.view.accessibility.AccessibilityEvent;
  * Runs concurrently with any Android UI testing framework (Mobly, Appium, Espresso)
  * without monopolizing Android's singleton UiAutomationService connection.
  *
- * The service subscribes to window-state changes only: that is the single event it
- * uses (to remember the foreground package / activity), and anything wider costs
- * CPU and battery on a device that is idle between tasks.
+ * The service subscribes to {@link #EVENT_TYPES}: window-state changes (the only event
+ * it handles itself, to remember the foreground package / activity) plus every event
+ * the framework's node cache needs to stay current. See {@link #EVENT_TYPES} for why
+ * the latter cannot be left to the framework.
  */
 public class ArtemisAccessibilityService extends AccessibilityService {
 
     private static final String TAG = "ArtemisA11yService";
     public static final int DEFAULT_PORT = 18888;
+
+    /**
+     * Window-state changes plus the events {@code AccessibilityCache} invalidates nodes on
+     * (its {@code CACHE_CRITICAL_EVENTS_MASK}, identical from Android 11 to 15).
+     *
+     * <p>The framework is meant to deliver those cache events to any service that reads
+     * nodes, subscribed or not, but it decides so lazily: a service counts as a cache user
+     * only after its first node query, and the event mask pushed to app processes is not
+     * recomputed at that moment. Apps that were already running (SystemUI, the app under
+     * test) therefore keep emitting window-state changes only, and every node the helper
+     * has ever read stays in its cache unchanged until the next window-state change: a
+     * scrolled list still reports the rows from before the scroll, a React Native screen
+     * pushed or popped inside the same Activity keeps the visibility it had when first
+     * read. Subscribing explicitly puts these types in the mask from the first
+     * {@code setServiceInfo} on, on every Android version.
+     *
+     * <p>Mirrored by {@code accessibilityEventTypes} in {@code res/xml/accessibility_service_config.xml}.
+     */
+    static final int EVENT_TYPES = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            | AccessibilityEvent.TYPE_WINDOWS_CHANGED
+            | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+            | AccessibilityEvent.TYPE_VIEW_SCROLLED
+            | AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+            | AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED
+            | AccessibilityEvent.TYPE_VIEW_SELECTED
+            | AccessibilityEvent.TYPE_VIEW_CLICKED
+            | AccessibilityEvent.TYPE_VIEW_FOCUSED
+            | AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED
+            | AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED;
     /**
      * Bumped whenever the HTTP contract changes in a way an older host cannot use.
      * 2: token authentication, byte-accurate bodies, visible-only dumps, fields=.
@@ -94,9 +124,12 @@ public class ArtemisAccessibilityService extends AccessibilityService {
             if (info == null) {
                 info = new AccessibilityServiceInfo();
             }
-            info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+            info.eventTypes = EVENT_TYPES;
             info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
-            info.notificationTimeout = 100;
+            // With a timeout the system keeps one pending event per type and drops the
+            // rest, so of two lists scrolled within the window only the last would have
+            // its cached rows invalidated.
+            info.notificationTimeout = 0;
             info.flags |= AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
                     | AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;
             // Not-important views are what UIAutomator's compressed dump leaves out;

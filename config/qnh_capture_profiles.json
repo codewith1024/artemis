@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "xiniu-changan": {
+      "store_name": "犀牛百货（长安店）",
+      "warehouse_id": "1137294",
+      "tenant_id": "1003684",
+      "store_code": "qnh_1137294",
+      "role": "competitor",
+      "default_device_serial": "R28M31LJX0E"
+    }
+  }
+}
