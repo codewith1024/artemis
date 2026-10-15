@@ -312,6 +312,10 @@ def require_device():
         if len(devices) > 1:
             die(f"检测到多台设备 {devices}，请用 --serial 指定一台。")
         CTX.serial = devices[0]
+    # Wi-Fi ADB 下熄屏后 input tap 会被静默丢弃（实测 SM-G9730），启动前先唤醒，
+    # 防止任务在屏幕已熄时启动导致后续点击全部丢失。采集期间持续点击会重置
+    # 熄屏倒计时，无需额外保活。
+    sh("input keyevent KEYCODE_WAKEUP")
     info(f"设备：{CTX.serial}")
 
 

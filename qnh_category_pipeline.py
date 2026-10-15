@@ -20,7 +20,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 PIPELINE = os.path.join(ROOT, "qnh_capture_pipeline.py")
 DEFAULT_SEGMENTS = os.path.join(ROOT, "config", "qnh_category_segments.json")
 PROFILE = "xiniu-changan"
-DEVICE = "R28M31LJX0E"
+DEVICE = "192.168.100.14:5555"  # Wi-Fi ADB；手机重启后需 USB 重新 adb tcpip 5555 + adb connect
 BOTTOM_STOP_REASON = "多次翻页画面不再变化，已到列表底部。"
 MAX_STABLE_LIST_SHORTFALL = 2
 MIN_STABLE_LIST_PASSES = 2
@@ -378,6 +378,8 @@ def read_full_store_count():
     scan.CTX.adb = scan.DEFAULT_ADB
     scan.CTX.serial = DEVICE
     scan.HelperState.allow_dump = True
+    # 此路径不走 require_device()，熄屏时 tap 会被静默丢弃，先唤醒
+    scan.sh("input keyevent KEYCODE_WAKEUP")
     if not scan.helper_setup():
         raise C.CaptureContractError("Helper 不可用，无法读取实时全部商品数")
     try:

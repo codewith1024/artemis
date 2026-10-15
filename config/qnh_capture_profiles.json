@@ -7,7 +7,7 @@
       "tenant_id": "1003684",
       "store_code": "qnh_1137294",
       "role": "competitor",
-      "default_device_serial": "R28M31LJX0E"
+      "default_device_serial": "192.168.100.14:5555"
     }
   }
 }
