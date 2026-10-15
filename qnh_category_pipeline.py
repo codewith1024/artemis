@@ -114,7 +114,7 @@ def _trusted_row_count(rows, *, complete_only=False):
     """Count each identity at its largest occurrence count in any one run."""
     groups = {}
     for row in rows:
-        if complete_only and (C.text_value(row.get("状态")) not in {"成功", "自建商品"}
+        if complete_only and (C.text_value(row.get("状态")) not in C.COMPLETE_ROW_STATUSES
                               or C.row_detail_errors(row)):
             continue
         prefix = os.path.abspath(row.get("证据前缀") or "")
@@ -273,7 +273,8 @@ def _terminate_process_group(process):
 
 
 def run_segment(root, segment, *, dismiss_order_dialogs, max_attempts=20,
-                 stall_seconds=1200, poll_seconds=5, backoff_cap_seconds=60):
+                 stall_seconds=1200, poll_seconds=5, backoff_cap_seconds=60,
+                 carry_baseline=None):
     directory = segment_dir(root, segment)
     os.makedirs(directory, exist_ok=True)
     last_error = ""
@@ -305,6 +306,8 @@ def run_segment(root, segment, *, dismiss_order_dialogs, max_attempts=20,
             "--capture-only",
             "--require-helper",
         ]
+        if carry_baseline:
+            command += ["--carry-baseline", carry_baseline]
         if dismiss_order_dialogs:
             command.append("--dismiss-order-dialogs")
         if resume_path:
@@ -529,6 +532,10 @@ def main():
     parser.add_argument("--aggregate-only", action="store_true")
     parser.add_argument("--full-store-count", type=int,
                         help="测试/离线聚合覆盖实时全部商品数")
+    parser.add_argument("--carry-baseline",
+                        help="每日增量携带基线 JSON，透传给各分片扫描")
+    parser.add_argument("--commit", action="store_true",
+                        help="聚合入库时直接提交（默认 dry-run 回滚）")
     args = parser.parse_args()
     inventory, segments = load_inventory(args.segments_file)
     root = os.path.abspath(args.out_dir)
@@ -565,7 +572,9 @@ def main():
                 max_attempts=args.segment_max_attempts,
                 stall_seconds=args.segment_stall_seconds,
                 poll_seconds=args.segment_poll_seconds,
-                backoff_cap_seconds=args.segment_backoff_cap_seconds)
+                backoff_cap_seconds=args.segment_backoff_cap_seconds,
+                carry_baseline=(os.path.abspath(args.carry_baseline)
+                                if args.carry_baseline else None))
             segment["expected_count"] = report.row_count
             state["completed"][key] = {
                 "manifest_path": os.path.abspath(manifest_path),
@@ -586,6 +595,7 @@ def main():
     subprocess.run([
         sys.executable, PIPELINE, "--profile", PROFILE,
         "--from-manifest", manifest_path,
+        *(["--commit"] if args.commit else []),
     ], check=True)
 
 

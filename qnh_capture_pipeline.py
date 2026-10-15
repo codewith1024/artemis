@@ -198,6 +198,8 @@ def run_capture(args, profile):
         command.append("--require-helper")
     if args.category:
         command += ["--category", args.category]
+    if getattr(args, "carry_baseline", None):
+        command += ["--carry-baseline", os.path.abspath(args.carry_baseline)]
     if args.resume:
         command += ["--resume", os.path.abspath(args.resume)]
     print("启动采集：" + " ".join(command), flush=True)
@@ -253,6 +255,9 @@ def main():
     parser.add_argument("--require-helper", action="store_true",
                         help="把 --require-helper 传给扫描器：助手不可用即快速失败")
     parser.add_argument("--category")
+    parser.add_argument("--carry-baseline",
+                        help="每日增量携带基线 JSON（qnh_daily_baseline.py 导出），"
+                             "透传给扫描器")
     parser.add_argument("--resume", help="父 manifest 或 CSV")
     parser.add_argument("--from-manifest", help="跳过采集，直接 gate/load 既有 final manifest")
     parser.add_argument("--capture-only", action="store_true")

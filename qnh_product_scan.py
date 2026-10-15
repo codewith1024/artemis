@@ -247,6 +247,9 @@ class Ctx:
     resume_missing_bindings = {}  # (条码,标题) → 已绑定的当前 UI 精确身份
     details = {}        # 稳定行身份 → 详情页字段（verify 时解析）
     resumed_details = {}  # 续跑：稳定行身份 → 上一轮 CSV 里的详情列
+    carry_details = {}  # 每日增量：指纹一致的行 → 基线详情列（文本原样沿用）
+    carry_baseline = None   # --carry-baseline 载入的基线（listing 定位串 → 条目）
+    carry_seen = None       # 携带命中的 listing 定位串集合（结束时报未命中数）
     last_detail_nodes = []  # open_detail 最后一次确认过的详情页节点，避免调用方重复 dump
     last_detail_fingerprint = None
     display_backup = None   # --tall-screen 前的 (size_override, density_override, effective_density)
@@ -924,6 +927,8 @@ def detail_cols(row):
     key = C.row_identity(row[0], row[1], row[2])
     detail = CTX.details.get(key)
     if detail is None:
+        if key in CTX.carry_details:
+            return list(CTX.carry_details[key])
         return CTX.resumed_details.get(key, [""] * len(DETAIL_COLUMNS))
     return [detail.get(column, "") for column in DETAIL_COLUMNS]
 
@@ -1400,7 +1405,60 @@ def video_offset():
 
 CSV_COLUMNS_LEGACY = C.BASE_COLUMNS
 CSV_COLUMNS = C.BASE_COLUMNS + C.META_COLUMNS
-RESUME_DONE = {"成功", "自建商品"}     # 续跑时视为已完成、不再点开的状态
+RESUME_DONE = {"成功", "自建商品", "携带"}   # 续跑时视为已完成、不再点开的状态
+
+# 携带基线（每日增量）：状态名与行构造。携带行不点详情页，卡片列来自
+# 本次滚动读到的卡片，详情列沿用基线快照。
+CARRY_STATUS = "携带"
+
+
+def load_carry_baseline(path):
+    """载入每日增量携带基线：{listing 定位串 → {fingerprint, detail}}。
+
+    fingerprint 为一级触发字段（三渠道价/采购价/售罄/规格/活动品）的
+    归一化键，与 compare_card_baseline 的输出可直接 == 比较。
+    """
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise C.CaptureContractError(f"携带基线格式不支持：{path}")
+    CTX.carry_baseline = data["products"]
+    CTX.carry_seen = set()
+    info(f"携带基线：{len(CTX.carry_baseline)} 个商品（{os.path.basename(path)}）")
+
+
+def compare_card_baseline(card, baseline_entry):
+    """今日卡片 vs 基线：一级触发字段全一致 → 返回携带详情列，否则 None。
+
+    触发字段即用户拍板的口径：三渠道价格、采购价、售罄、规格、活动品。
+    月售/库存不计触发（二级变化，卡片今日值经 CTX.cards 照常入 CSV）。
+    """
+    p = card["prices"]
+    split = len(p) == CARD_PRICE_ROWS
+    today = {
+        "spec": C.normalize_name(card["spec"]),
+        "sold_out": bool(card["sold_out"]),
+        "promo_item": bool(card["promo_item"]),
+        "prices": [C.carry_price_key(p[i]) if split and i < len(p) else None
+                   for i in range(4)],
+    }
+    if any(today[field] != baseline_entry["fingerprint"][field]
+           for field in ("spec", "sold_out", "promo_item", "prices")):
+        return None
+    return baseline_entry["detail"]
+
+
+def _carry_row(idx, prod, detail_values):
+    """构造携带行：列表读卡今日值 + 基线详情列，不点开详情页。
+
+    卡片列不需要单独存：compare 命中时该卡的完整字段刚由 find_products
+    写入 CTX.cards，card_cols() 会输出与其他行一致的今日值。
+    """
+    info(f"[{idx:>3}] ≡ {prod['title'][:36]}  指纹一致，携带基线")
+    CTX.rows.append([idx, prod["title"], prod["barcode"], "", "",
+                     CARRY_STATUS, video_offset(), *capture_meta()])
+    remember_row_product(idx, prod)
+    CTX.carry_details[C.row_identity(idx, prod["title"], prod["barcode"])] = detail_values
 
 
 def capture_meta(now=None):
@@ -2196,6 +2254,20 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
         remember_row_product(idx, prod)
         return time.time() - t0
 
+    # 每日增量：指纹一致的商品不点详情页，直接写携带行。卡片此刻可能
+    # 只露出一半（read_card 返回 None）；翻页后完整露出时会更新 CTX.cards，
+    # 因此这里拿不到完整卡片就当"有变化"处理，走完整详情页路径。
+    if CTX.carry_baseline is not None:
+        listing = C.listing_identity(prod["title"], prod["barcode"])
+        baseline_entry = CTX.carry_baseline.get(listing)
+        card = CTX.cards.get(product_identity(prod))
+        if baseline_entry is not None and card:
+            detail_values = compare_card_baseline(card, baseline_entry)
+            if detail_values is not None:
+                CTX.carry_seen.add(listing)
+                _carry_row(idx, prod, detail_values)
+                return time.time() - t0
+
     if not open_detail(prod, load, screen=(sw, sh_), pace=pace):
         return skip("未打开", "详情页没打开，已跳过")
 
@@ -2878,6 +2950,9 @@ def main():
                     help="每处理多少个商品原子保存一次 CSV（默认 50；0=只在结束时保存）")
     ap.add_argument("--dismiss-order-dialogs", action="store_true",
                     help="关闭‘顾客修改了订单信息’弹窗的‘我知道了’按钮（需业务授权）")
+    ap.add_argument("--carry-baseline", metavar="JSON",
+                    help="每日增量携带基线：指纹一致的商品跳过详情页，"
+                         "详情列沿用基线（由 qnh_daily_baseline.py 导出）")
     ap.add_argument("--profile", help="config/qnh_capture_profiles.json 中的门店 profile")
     ap.add_argument("--profiles-file", default=C.DEFAULT_PROFILE_FILE,
                     help="门店 profile 文件")
@@ -2902,6 +2977,9 @@ def main():
 
     if args.seed is not None:
         random.seed(args.seed)
+
+    if args.carry_baseline:
+        load_carry_baseline(os.path.abspath(args.carry_baseline))
 
     parent_manifest = None
     parent_manifest_path = None
@@ -3448,6 +3526,12 @@ def main():
                  "建议放慢节奏（--pace natural）或拆成几段错开时间跑。")
         if HelperState.ready and HelperState.action_failures:
             warn(f"助手手势失败 {HelperState.action_failures} 次，已自动改用 input 补上")
+        if CTX.carry_baseline is not None:
+            unseen = len(CTX.carry_baseline) - len(CTX.carry_seen or ())
+            carried_n = sum(1 for row in CTX.rows if row[5] == CARRY_STATUS)
+            info(f"携带基线：命中 {len(CTX.carry_seen)} / {len(CTX.carry_baseline)}"
+                 + (f"，未命中 {unseen} 个（按当日实际可见处理，已全部走详情页或不在列表）"
+                    if unseen else ""))
 
     except Exception as exc:
         if not CTX.interrupted:

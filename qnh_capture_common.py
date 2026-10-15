@@ -47,7 +47,7 @@ DETAIL_COLUMNS = [
     "卖点", "可售日期", "礼袋", "是否力荐", "是否标品",
 ]
 FULL_COLUMNS = BASE_COLUMNS + META_COLUMNS + CARD_COLUMNS + DETAIL_COLUMNS
-COMPLETE_ROW_STATUSES = {"成功", "自建商品"}
+COMPLETE_ROW_STATUSES = {"成功", "自建商品", "携带"}
 TERMINAL_MANIFEST_STATES = {"success", "partial", "interrupted", "failed"}
 LISTING_STATUS_MAP = {"已上架": "on_shelf", "已下架": "off_shelf", "未上线": "not_online"}
 YES_NO_MAP = {"是": 1, "否": 0}
@@ -387,6 +387,19 @@ def fact_fields_from_csv(source: dict, channel: str, price_column: str,
         "evidence_uri": row_evidence(csv_path, source),
         "evidence_video_time": field_value(source.get("视频时间点")),
     }
+
+
+def carry_price_key(text):
+    """列表卡片价格文本的规范化比较键（每日增量指纹用）。
+
+    数值价格 → 无指数、去尾零的十进制字符串（"45.00" 与 DB 45.0000 同键）；
+    非数值（如「无数据」）保留原文；空值 → None。
+    """
+    value = nonnegative_amount(text)
+    if value is not None:
+        return format(value.normalize(), "f")
+    value = text_value(text)
+    return value or None
 
 
 def row_category_map(manifest: dict, row_count: int) -> list[tuple[str | None, str | None]]:
