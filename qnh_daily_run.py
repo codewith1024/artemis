@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import signal
@@ -24,6 +25,24 @@ DEVICE = "192.168.100.14:5555"  # Wi-Fi ADB；手机重启后需 USB 重新 adb 
 
 OK, FAILED, SKIPPED = "ok", "failed", "skipped"
 CHILD_PIDS = []   # 当前子进程 PID（写入状态文件，供巡检会话精确清理）
+
+
+def acquire_runner_lock():
+    path = os.path.join(ROOT, "qnh_daily", ".runner.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock = open(path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.seek(0)
+        owner = lock.read().strip() or "unknown"
+        lock.close()
+        raise RuntimeError(f"已有每日采集 runner 占用设备（{owner}）")
+    lock.seek(0)
+    lock.truncate()
+    lock.write(f"pid={os.getpid()} started_at={datetime.now().isoformat(timespec='seconds')}\n")
+    lock.flush()
+    return lock
 
 
 def adb(*args, timeout=15):
@@ -45,11 +64,13 @@ def write_status(out_dir, **fields):
     return path
 
 
-def run(command, log_fh):
+def run(command, log_fh, *, on_start=None):
     """启动子进程并登记 PID；Ctrl-C 先 SIGINT 让扫描器存断点再兜底 kill。"""
     print("[daily] " + " ".join(command), flush=True)
     process = subprocess.Popen(command, stdout=log_fh, stderr=subprocess.STDOUT)
     CHILD_PIDS.append(process.pid)
+    if on_start:
+        on_start(process.pid)
     try:
         return process.wait()
     except KeyboardInterrupt:
@@ -62,6 +83,11 @@ def run(command, log_fh):
         except subprocess.TimeoutExpired:
             process.kill()
             return process.wait()
+    finally:
+        try:
+            CHILD_PIDS.remove(process.pid)
+        except ValueError:
+            pass
 
 
 def main():
@@ -79,6 +105,11 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     log_path = os.path.join(out_dir, "daily.log")
     baseline_path = os.path.join(ROOT, "qnh_daily", "carry_baseline.json")
+    try:
+        runner_lock = acquire_runner_lock()
+    except RuntimeError as exc:
+        print(f"[daily] {exc}", file=sys.stderr)
+        raise SystemExit(4)
     write_status(out_dir, state="running", stage="start", runner_pid=os.getpid())
 
     # 前置：设备必须在线（Wi-Fi ADB 常连接口）。
@@ -107,13 +138,16 @@ def main():
 
         stamp("分片采集（携带基线 + 断点续跑）")
         write_status(out_dir, state="running", stage="capture",
-                     child_pids=list(CHILD_PIDS))
+                     runner_pid=os.getpid(), child_pids=[])
         code = run([sys.executable, os.path.join(ROOT, "qnh_category_pipeline.py"),
                     "--out-dir", out_dir,
                     "--carry-baseline", baseline_path,
                     *([] if args.no_commit else ["--commit"]),
                     *([] if args.no_dismiss_dialogs else ["--dismiss-order-dialogs"])],
-                   log_fh)
+                   log_fh,
+                   on_start=lambda pid: write_status(
+                       out_dir, state="running", stage="capture",
+                       runner_pid=os.getpid(), child_pids=[pid]))
         if code != 0:
             write_status(out_dir, state=FAILED, stage="capture",
                          error=f"采集/入库退出码 {code}；日志 {log_path}",

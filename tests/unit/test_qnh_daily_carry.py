@@ -8,6 +8,7 @@ import unittest
 import uuid
 
 import qnh_capture_common as C
+import qnh_daily_run as daily
 
 
 def carry_row(index=1, name="商品A", barcode="6900000000001", prefix=""):
@@ -28,6 +29,22 @@ def carry_row(index=1, name="商品A", barcode="6900000000001", prefix=""):
         "可售日期": "不限", "礼袋": "0个礼袋", "是否力荐": "否", "是否标品": "标品",
     })
     return row
+
+
+class DailyRunnerLockTests(unittest.TestCase):
+    def test_runner_lock_is_exclusive_and_reusable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original_root = daily.ROOT
+            daily.ROOT = directory
+            try:
+                first = daily.acquire_runner_lock()
+                with self.assertRaisesRegex(RuntimeError, "已有每日采集 runner"):
+                    daily.acquire_runner_lock()
+                first.close()
+                second = daily.acquire_runner_lock()
+                second.close()
+            finally:
+                daily.ROOT = original_root
 
 
 class CarryStatusTests(unittest.TestCase):
