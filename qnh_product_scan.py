@@ -473,9 +473,22 @@ def dump_xml(retries=2):
     """
     if HelperState.ready and HelperState.use_for_dump:
         xml = helper_dump()
+        if not xml:
+            HelperState.dump_failures += 1
+            if HelperState.dump_failures >= HELPER_DUMP_RECONNECT_AFTER:
+                HelperState.dump_failures = 0
+                if _helper_reconnect():
+                    info(f"助手端口转发丢失已重建（127.0.0.1:{HelperState.port}），"
+                         "继续走助手层级")
+                    xml = helper_dump()
+                else:
+                    warn("助手 forward 重建失败，回退到 input / uiautomator")
+            if not xml:
+                warn("助手取层级失败，本次回退到 uiautomator")
+        else:
+            HelperState.dump_failures = 0
         if xml:
             return xml
-        warn("助手取层级失败，本次回退到 uiautomator")
 
     def _try_all():
         order = ([DumpState.working] if DumpState.working else []) + \
@@ -969,6 +982,9 @@ class HelperState:
     has_text_query = False
     has_any_text_query = False
     has_semantic_scroll = False
+    dump_failures = 0     # 连续 /dump_xml 失败数；达阈值重建 forward
+
+HELPER_DUMP_RECONNECT_AFTER = 3   # 连续失败这么多次就重建 adb forward
 
 
 def _helper_http(path, payload=None, timeout=10.0):
@@ -985,6 +1001,28 @@ def _helper_http(path, payload=None, timeout=10.0):
             return resp.read().decode("utf-8", "replace")
     except Exception:
         return None
+
+
+def _helper_reconnect():
+    """Wi-Fi ADB 的 adb server 可能清空端口转发表（forward 丢失但设备仍在线）：
+    重建 forward + 重推 token。成功返回 True。"""
+    HelperState.forwarded = False
+    out = adb("forward", "tcp:0", f"tcp:{HELPER_DEVICE_PORT}").strip()
+    m = re.search(r"(\d+)", out)
+    if not m:
+        return False
+    HelperState.port = int(m.group(1))
+    HelperState.forwarded = True
+    sh(f"am broadcast -n {HELPER_TOKEN_RECEIVER} -a {HELPER_TOKEN_ACTION} "
+       f"--es token {HelperState.token}")
+    raw = _helper_http("/ping", timeout=4.0)
+    if not raw:
+        return False
+    try:
+        pong = json.loads(raw)
+    except ValueError:
+        return False
+    return bool(pong.get("authenticated", pong.get("authed")))
 
 
 def helper_setup():
