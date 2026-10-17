@@ -457,7 +457,9 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
             for source, collected_at, row_category in zip(rows, times, row_categories):
                 row_category_l1, row_category_l2 = row_category
                 for channel, price_column in PRICE_CHANNELS:
-                    key = listing_key(source["商品名称"], source.get("条码"), seen[channel])
+                    key = listing_key(
+                        source["商品名称"], source.get("条码"), seen[channel],
+                        source.get("SKU"), source.get("SPU"))
                     fact_fields = C.fact_fields_from_csv(
                         source, channel, price_column, context["csv_path"])
                     insert(cur, "fact_store_product_snapshot", dict(

@@ -162,13 +162,25 @@ class ManifestGateTests(unittest.TestCase):
             self.assertTrue(any("商品数不完整" in error for error in report.errors))
             self.assertTrue(any("不完整状态" in error for error in report.errors))
 
-    def test_duplicate_barcode_less_names_are_rejected(self):
+    def test_duplicate_names_without_any_stable_id_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             rows = [complete_row(1, "同 名", ""), complete_row(2, "同   名", "")]
+            for row in rows:
+                row["SPU"] = ""
+                row["SKU"] = ""
             _, path = self.make_capture(directory, rows)
             report = C.validate_manifest(path, require_complete=True)
             self.assertFalse(report.ok)
-            self.assertTrue(any("无条码同名" in error for error in report.errors))
+            self.assertTrue(any("无条码/SKU/SPU同名" in error for error in report.errors))
+
+    def test_duplicate_barcode_less_names_with_distinct_skus_are_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [complete_row(1, "同 名", ""), complete_row(2, "同   名", "")]
+            rows[0]["SPU"], rows[0]["SKU"] = "spu-1", "sku-1"
+            rows[1]["SPU"], rows[1]["SKU"] = "spu-2", "sku-2"
+            _, path = self.make_capture(directory, rows)
+            report = C.validate_manifest(path, require_complete=True)
+            self.assertTrue(report.ok, report.errors)
 
     def test_invalid_numeric_on_shelf_fields_fail_without_card_fallback(self):
         with tempfile.TemporaryDirectory() as directory:

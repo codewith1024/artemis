@@ -767,13 +767,28 @@ class EvidenceAndLoaderHelperTests(unittest.TestCase):
         renamed = loader.listing_key("改了名", "6945906100802", {})
         self.assertEqual(by_barcode, renamed)
 
-    def test_listing_key_falls_back_to_name_without_barcode(self):
+    def test_listing_key_falls_back_to_name_without_stable_source_id(self):
         seen = {}
         first = loader.listing_key(" 同  名 ", "", seen)
         second = loader.listing_key("同 名", "", seen)
         self.assertNotEqual(first, second)
         # 有条码的商品不占用名称键的序号
         self.assertEqual(loader.listing_key("同名", "123", seen), loader.listing_key("同名", "123", {}))
+
+    def test_listing_key_uses_sku_then_spu_only_when_barcode_is_blank(self):
+        sku_a = loader.listing_key("同名", "", {}, "sku-a", "spu-a")
+        sku_b = loader.listing_key("同名", "", {}, "sku-b", "spu-a")
+        self.assertNotEqual(sku_a, sku_b)
+        self.assertEqual(
+            loader.listing_key("旧名", "", {}, "sku-a", "spu-a"),
+            loader.listing_key("新名", "", {}, "sku-a", "spu-b"))
+        self.assertEqual(
+            loader.listing_key("旧名", "", {}, "", "spu-a"),
+            loader.listing_key("新名", "", {}, "", "spu-a"))
+        # Existing barcode history remains barcode-first even when SKU changes.
+        self.assertEqual(
+            loader.listing_key("旧名", "6900000000001", {}, "sku-a", "spu-a"),
+            loader.listing_key("新名", "6900000000001", {}, "sku-b", "spu-b"))
 
     def test_listing_key_disambiguates_duplicate_names(self):
         seen = {}

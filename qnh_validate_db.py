@@ -75,7 +75,9 @@ def _expected_by_key(rows, csv_path, snapshot, category=None, manifest=None):
         seen = {}
         for source, collected_at, row_category in zip(rows, times, row_categories):
             category_l1, category_l2 = row_category
-            key = C.listing_key(source["商品名称"], source.get("条码"), seen)
+            key = C.listing_key(
+                source["商品名称"], source.get("条码"), seen,
+                source.get("SKU"), source.get("SPU"))
             expected[(channel, key)] = {
                 "batch_id": snapshot["batch_id"],
                 "store_snapshot_id": snapshot["store_snapshot_id"],
@@ -332,7 +334,9 @@ def validate_snapshot(conn, csv_path, snapshot_id, *, manifest_path=None):
         for channel, _ in C.PRICE_CHANNELS:
             seen = {}
             for source in rows:
-                key = C.listing_key(source["商品名称"], source.get("条码"), seen)
+                key = C.listing_key(
+                source["商品名称"], source.get("条码"), seen,
+                source.get("SKU"), source.get("SPU"))
                 standard = unique_master.get(C.text_value(source.get("条码")))
                 if standard:
                     expected_maps[(channel, key)] = {

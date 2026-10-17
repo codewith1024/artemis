@@ -121,13 +121,27 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", text_value(name))
 
 
-def listing_identity(name, barcode) -> str:
+def listing_identity(name, barcode, source_sku_id=None, source_spu_id=None) -> str:
+    """Stable listing locator, preserving the established barcode-first contract.
+
+    QNH rows historically key barcode-bearing products by barcode; changing those to
+    SKU would fork every product's history. Only genuinely barcode-less rows fall back
+    to the detail-page SKU/SPU before the last-resort normalized name.
+    """
     barcode = text_value(barcode)
-    return "barcode:" + barcode if barcode else "name:" + normalize_name(name) + "|"
+    source_sku_id = text_value(source_sku_id)
+    source_spu_id = text_value(source_spu_id)
+    if barcode:
+        return "barcode:" + barcode
+    if source_sku_id:
+        return "sku:" + source_sku_id
+    if source_spu_id:
+        return "spu:" + source_spu_id
+    return "name:" + normalize_name(name) + "|"
 
 
-def listing_key(name, barcode, seen):
-    base = listing_identity(name, barcode)
+def listing_key(name, barcode, seen, source_sku_id=None, source_spu_id=None):
+    base = listing_identity(name, barcode, source_sku_id, source_spu_id)
     seen[base] = seen.get(base, 0) + 1
     locator = base if seen[base] == 1 else f"{base}#{seen[base]}"
     return hashlib.sha256(locator.encode("utf-8")).hexdigest()
@@ -742,7 +756,7 @@ def validate_manifest(path: str, *, require_complete: bool = True,
             f"{key or '<空>'}{value}个" for key, value in bad_statuses.items()))
 
     detail_errors = []
-    blank_name_counts = Counter()
+    unstable_name_counts = Counter()
     evidence_prefixes = set()
     row_datetimes = []
     for i, row in enumerate(rows, 1):
@@ -750,8 +764,9 @@ def validate_manifest(path: str, *, require_complete: bool = True,
         barcode = text_value(row.get("条码"))
         if not name:
             report.fail(f"第{i}行缺少商品名称")
-        if not barcode:
-            blank_name_counts[name] += 1
+        if (not barcode and not text_value(row.get("SKU"))
+                and not text_value(row.get("SPU"))):
+            unstable_name_counts[name] += 1
         raw_status = str(row.get("状态") or "")
         if raw_status != raw_status.strip():
             report.fail(f"第{i}行状态含首尾空白")
@@ -789,9 +804,9 @@ def validate_manifest(path: str, *, require_complete: bool = True,
         report.fail("manifest detail_complete_count 与 CSV 不一致")
     if require_complete and detail_errors:
         report.fail("详情字段不完整：" + "；".join(detail_errors[:10]))
-    ambiguous = [name for name, count in blank_name_counts.items() if name and count > 1]
+    ambiguous = [name for name, count in unstable_name_counts.items() if name and count > 1]
     if ambiguous:
-        message = "无条码同名商品无法稳定定位：" + "、".join(ambiguous[:10])
+        message = "无条码/SKU/SPU同名商品无法稳定定位：" + "、".join(ambiguous[:10])
         if require_complete:
             report.fail(message)
         else:

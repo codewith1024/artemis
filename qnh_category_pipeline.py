@@ -430,7 +430,8 @@ def merge_segments(root, inventory, segments, state_path, *, full_count=None):
         for row_index, row in enumerate(report.rows):
             if row_index in redundant_spec_rows:
                 continue
-            base = (C.listing_identity(row.get("商品名称"), row.get("条码"))
+            base = (C.listing_identity(
+                row.get("商品名称"), row.get("条码"), row.get("SKU"), row.get("SPU"))
                     + "|spec:" + C.normalize_name(row.get("规格")))
             occurrence[base] = occurrence.get(base, 0) + 1
             key = f"{base}#{occurrence[base]}"
