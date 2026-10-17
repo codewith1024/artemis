@@ -635,29 +635,33 @@ def current_blocking_dialog():
 
 
 def dismiss_blocking_dialog(nodes=None):
-    """Close the authorized order-notification dialog: swipe it away first (the
-    only gesture this MRN dialog layer accepts), then fall back to the button."""
-    for attempt in range(3):
+    """Close the authorized order-notification dialog.
+
+    The dialog's visible ``我知道了`` TextView is not clickable; its parent is.
+    At the normal 1080x2280 override ADB taps work, but the 1080x4560 tall override is
+    pillarboxed onto the 1440x3040 panel and Android ``input tap`` does not map the
+    XML coordinates back to that surface. Accessibility gestures do, so always use
+    the Helper for the clickable parent bounds. Fall back to the text bounds only for
+    older helper XMLs that omit the parent.
+    """
+    for _ in range(3):
         nodes = parse_nodes(dump_xml())
         if not blocking_dialog(nodes):
             return True
-        # The card body spans most of the width; swipe it left off-screen.
-        card = max((n for n in nodes if n["text"] and n["w"] > 500 and n["h"] > 60
-                    and n["cy"] > 300 and n["cy"] < 4000),
-                   key=lambda n: n["w"] * n["h"], default=None)
-        y = card["cy"] if card else 1500
-        sh(f"input swipe 950 {y} 80 {y} 200")
+        label = next((n for n in nodes if n["text"] == "我知道了"), None)
+        if not label:
+            break
+        parent = min((n for n in nodes if n["clickable"]
+                      and n["x1"] <= label["cx"] <= n["x2"]
+                      and n["y1"] <= label["cy"] <= n["y2"]),
+                     key=lambda n: n["w"] * n["h"], default=label)
+        result = helper_action("tap", x=parent["cx"], y=parent["cy"])
+        if result is False:
+            sh(f"input tap {parent['cx']} {parent['cy']}")
         time.sleep(1.2)
-        if not blocking_dialog(parse_nodes(dump_xml())):
+        if not current_blocking_dialog():
             return True
-    buttons = [node for node in parse_nodes(dump_xml())
-               if node["text"] == "我知道了" and node["w"] > 0 and node["h"] > 0]
-    if buttons:
-        button = max(buttons, key=lambda item: item["w"] * item["h"])
-        human_tap(button["cx"], button["cy"],
-                  box=(button["x1"], button["y1"], button["x2"], button["y2"]))
-        time.sleep(0.8)
-    return not current_blocking_dialog()
+    return False
 
 
 def wait_while_dialog(where):
