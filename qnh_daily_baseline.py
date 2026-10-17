@@ -197,8 +197,9 @@ def fetch_baseline(conn, store_code):
     products = {}
     rebuilt = []   # (row, meituan, eleme, jddj) 供自检
     missing_channel = 0
-    duplicate_listing = 0
     lossy = 0
+    candidates = []
+    listing_counts = {}
     for meituan in meituan_rows:
         eleme = others.get(("eleme", meituan["listing_key"]))
         jddj = others.get(("jddj", meituan["listing_key"]))
@@ -206,9 +207,17 @@ def fetch_baseline(conn, store_code):
             missing_channel += 1
             continue
         row = row_from_fact(meituan, eleme, jddj)
+        # Scanner can only know name/barcode before opening detail. If two DB rows
+        # share that visible identity, carrying either one could attach the wrong
+        # SKU's detail. Exclude the entire ambiguous group; all members go through
+        # today's detail page instead.
         listing = C.listing_identity(row["商品名称"], row["条码"])
-        if listing in products:
-            duplicate_listing += 1
+        listing_counts[listing] = listing_counts.get(listing, 0) + 1
+        candidates.append((listing, row, meituan, eleme, jddj))
+
+    ambiguous_rows = sum(count for count in listing_counts.values() if count > 1)
+    for listing, row, meituan, eleme, jddj in candidates:
+        if listing_counts[listing] > 1:
             continue
         if _roundtrip_errors(row, meituan, eleme, jddj):
             # DB 装不下原文精度（6 位小数采购价被 decimal(18,4) 截断）或
@@ -225,8 +234,9 @@ def fetch_baseline(conn, store_code):
         rebuilt.append((row, meituan, eleme, jddj))
     if missing_channel:
         print(f"警告：{missing_channel} 个商品缺少渠道行，未入基线", flush=True)
-    if duplicate_listing:
-        print(f"警告：{duplicate_listing} 个 listing 重复，保留首个", flush=True)
+    if ambiguous_rows:
+        print(f"警告：{ambiguous_rows} 个商品列表身份重叠，整组不携带、每日走详情页",
+              flush=True)
     if lossy:
         print(f"警告：{lossy} 个商品 DB 值不可逆（精度/形态边界），不携带、每日走详情页",
               flush=True)
