@@ -144,7 +144,7 @@ class CarryCompareTests(unittest.TestCase):
             scan.compare_card_baseline(card, {"fingerprint": self.fingerprint(card),
                                               "detail": ["d"]}), ["d"])
 
-    def test_price_change_triggers(self):
+    def test_persistent_price_change_still_triggers(self):
         import qnh_product_scan as scan
         base = self.make_card(["45", "50", "55", "3.5"])
         today = self.make_card(["44", "50", "55", "3.5"])

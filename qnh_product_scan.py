@@ -2314,6 +2314,23 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
         card = CTX.cards.get(product_identity(prod))
         if baseline_entry is not None and card:
             detail_values = compare_card_baseline(card, baseline_entry)
+            if detail_values is None:
+                # RN list cards can briefly expose stale/partial values during FlatList
+                # remounting, then overwrite CTX.cards with the settled card later. One
+                # fresh read avoids an unnecessary 9–12s detail visit; a persistent
+                # mismatch still follows the strict detail path.
+                time.sleep(0.18)
+                refreshed_nodes = parse_nodes(dump_xml())
+                if not blocking_dialog(refreshed_nodes):
+                    refreshed = next((item for item in find_products(
+                        refreshed_nodes, detect_watermarks(refreshed_nodes))
+                                      if same_product(item, prod)), None)
+                    if refreshed is not None:
+                        prod = refreshed
+                        settled_card = CTX.cards.get(product_identity(prod))
+                        if settled_card:
+                            detail_values = compare_card_baseline(
+                                settled_card, baseline_entry)
             if detail_values is not None:
                 CTX.carry_seen.add(listing)
                 _carry_row(idx, prod, detail_values)
