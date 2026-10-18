@@ -129,13 +129,22 @@ def row_from_fact(meituan, eleme, jddj):
 
 
 def fingerprint_from_row(row):
-    """40 列 CSV 行 → 一级触发指纹（与 scanner compare_card_baseline 对齐）。"""
+    """40 列 CSV 行 → 一级触发指纹（与 scanner compare_card_baseline 对齐）。
+
+    Older snapshots sometimes parsed a combo product's first channel retail price as
+    its purchase price even though the list card showed ``无数据``. A combo purchase
+    unit therefore makes that fourth component unknown: channel prices remain strict,
+    but this known-lossy historical value must not force a detail visit.
+    """
+    purchase_key = C.carry_price_key(row.get("采购价"))
+    if C.text_value(row.get("采购单位_详情")).startswith("组合品("):
+        purchase_key = None
     return {
         "spec": C.normalize_name(row.get("规格")),
         "sold_out": C.text_value(row.get("售罄")) == "是",
         "promo_item": C.text_value(row.get("活动品")) == "是",
         "prices": [C.carry_price_key(row.get(column)) for column in
-                   ("美团闪购价", "饿了么价", "京东到家价", "采购价")],
+                   ("美团闪购价", "饿了么价", "京东到家价")] + [purchase_key],
     }
 
 

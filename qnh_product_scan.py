@@ -1484,9 +1484,16 @@ def compare_card_baseline(card, baseline_entry):
         "prices": [C.carry_price_key(p[i]) if split and i < len(p) else None
                    for i in range(4)],
     }
-    if any(today[field] != baseline_entry["fingerprint"][field]
-           for field in ("spec", "sold_out", "promo_item", "prices")):
-        return None
+    # None in the baseline marks a deliberately unknown historical component (for
+    # example combo purchase prices parsed from a channel retail row). Unknown never
+    # triggers; every concrete baseline value remains strict.
+    baseline = baseline_entry["fingerprint"]
+    for field in ("spec", "sold_out", "promo_item"):
+        if today[field] != baseline[field]:
+            return None
+    for current, previous in zip(today["prices"], baseline["prices"]):
+        if previous is not None and current != previous:
+            return None
     return baseline_entry["detail"]
 
 

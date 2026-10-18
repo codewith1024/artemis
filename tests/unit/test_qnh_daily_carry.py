@@ -158,6 +158,21 @@ class CarryCompareTests(unittest.TestCase):
         self.assertIsNotNone(scan.compare_card_baseline(
             today, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
 
+    def test_unknown_baseline_price_component_does_not_trigger(self):
+        import qnh_product_scan as scan
+        today = self.make_card(["45", "50", "55", "无数据"])
+        baseline = self.fingerprint(self.make_card(["45", "50", "55", "45"]))
+        baseline["prices"][3] = None
+        self.assertIsNotNone(scan.compare_card_baseline(
+            today, {"fingerprint": baseline, "detail": ["d"]}))
+
+    def test_concrete_baseline_price_still_triggers(self):
+        import qnh_product_scan as scan
+        base = self.make_card(["45", "50", "55", "3.5"])
+        today = self.make_card(["45", "50", "55", "无数据"])
+        self.assertIsNone(scan.compare_card_baseline(
+            today, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
+
     def test_stock_and_month_change_do_not_trigger(self):
         # 二级变化：只改库存/月售，指纹只看一级字段 → 仍携带（今日值经卡片入 CSV）
         import qnh_product_scan as scan
