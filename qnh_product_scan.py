@@ -2592,7 +2592,13 @@ def tap_text_xml(text, *, max_x=None, min_y=0, force_adb=False):
     if force_adb:
         sh(f"input tap {x} {y}")
     else:
-        human_tap(x, y, box=box)
+        result = helper_action("tap", x=x, y=y) if HelperState.ready else False
+        if result is None and _helper_reconnect():
+            result = helper_action("tap", x=x, y=y)
+        if result is False:
+            sh(f"input tap {x} {y}")
+        elif result is None:
+            warn(f"助手点击「{text}」回执不确定；等待页面状态确认")
     return True
 
 
@@ -2865,27 +2871,39 @@ def selected_list_count(nodes, expected_title):
     return candidates[0] if candidates else None
 
 
-def category_list_ready(count, new_keys, before_keys, last_new_keys):
-    """Require target title plus a changed, stable FlatList identity set."""
-    return (count is not None and bool(new_keys)
-            and (not before_keys or new_keys != before_keys)
-            and new_keys == last_new_keys)
+def category_list_ready(count, new_keys, before_keys, last_new_keys,
+                        stable_same_count=0):
+    """Require target title and a stable FlatList.
+
+    Normally the target list must differ from the previous leaf and stabilize twice.
+    Some leaves legitimately share the same first screen as 全部商品; once the target
+    title is present and the unchanged cards stay stable for four polls, accept it.
+    """
+    if count is None or not new_keys:
+        return False
+    changed = not before_keys or new_keys != before_keys
+    return ((changed and new_keys == last_new_keys)
+            or (not changed and stable_same_count >= 4))
 
 
 def wait_category_list_refresh(leaf, before_keys, timeout):
     """Wait for a clicked leaf's title and FlatList to refresh and stabilize."""
     deadline = time.monotonic() + timeout
     last_new_keys = None
+    stable_same_count = 0
     while time.monotonic() < deadline:
         nodes = parse_nodes(dump_xml())
         count = selected_list_count(nodes, leaf)
         products = find_products(nodes, detect_watermarks(nodes))
         new_keys = {product_identity(product) for product in products}
-        # MRN标题会先切换、FlatList稍后才刷新。要求新列表身份变化后
-        # 连续两次一致，不能把上一叶子幽灵卡当目标类目商品。
-        if category_list_ready(count, new_keys, before_keys, last_new_keys):
-            return count, nodes
         changed = bool(new_keys) and (not before_keys or new_keys != before_keys)
+        stable_same_count = (stable_same_count + 1
+                             if new_keys and new_keys == before_keys else 0)
+        # MRN标题会先切换、FlatList稍后才刷新。变化列表要求连续两次一致；
+        # 合法同首屏则标题正确后连续四次稳定才放行。
+        if category_list_ready(count, new_keys, before_keys, last_new_keys,
+                               stable_same_count):
+            return count, nodes
         last_new_keys = new_keys if changed else None
         time.sleep(0.35)
     return None

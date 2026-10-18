@@ -184,9 +184,13 @@ class ProductIdentityTests(unittest.TestCase):
     def test_category_list_ready_rejects_title_before_flatlist_refresh(self):
         old = {("old", "", "")}
         new = {("new", "", "")}
-        self.assertFalse(scan.category_list_ready(36, old, old, None))
-        self.assertFalse(scan.category_list_ready(36, new, old, None))
-        self.assertTrue(scan.category_list_ready(36, new, old, new))
+        self.assertFalse(scan.category_list_ready(36, old, old, None, 1))
+        self.assertFalse(scan.category_list_ready(36, new, old, None, 0))
+        self.assertTrue(scan.category_list_ready(36, new, old, new, 0))
+        # A legitimate target can share the 全部商品 first screen; require four
+        # stable observations after its title appears before accepting it.
+        self.assertFalse(scan.category_list_ready(457, old, old, None, 3))
+        self.assertTrue(scan.category_list_ready(457, old, old, None, 4))
 
     def test_category_refresh_allows_four_second_mrn_render(self):
         old_product = {"title": "旧商品", "barcode": "", "spec": ""}
