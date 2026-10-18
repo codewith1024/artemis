@@ -16,7 +16,6 @@ import pymysql
 
 import qnh_capture_common as C
 
-DB_CONFIG = os.path.expanduser("~/.claude/skills/qnh-database/db_config.json")
 DATABASE = "retail_price_snapshot"
 STORE_CHANNEL = C.STORE_CHANNEL
 PRICE_CHANNELS = C.PRICE_CHANNELS
@@ -103,7 +102,7 @@ def _parse_dt(value, fallback):
 
 
 def _db_config():
-    with open(DB_CONFIG, encoding="utf-8") as fh:
+    with open(C.db_config_path(), encoding="utf-8") as fh:
         return json.load(fh)
 
 

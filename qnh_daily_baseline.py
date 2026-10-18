@@ -26,7 +26,6 @@ import pymysql
 
 import qnh_capture_common as C
 
-DB_CONFIG = os.path.expanduser("~/.claude/skills/qnh-database/db_config.json")
 DATABASE = "retail_price_snapshot"
 
 YES_NO = {1: "是", 0: "否"}
@@ -34,7 +33,7 @@ STD_FLAG = {1: "标品", 0: "非标品"}
 
 
 def _db_open():
-    with open(DB_CONFIG, encoding="utf-8") as fh:
+    with open(C.db_config_path(), encoding="utf-8") as fh:
         cfg = json.load(fh)
     return pymysql.connect(
         host=cfg["host"], port=cfg["port"], user=cfg["user"], password=cfg["password"],

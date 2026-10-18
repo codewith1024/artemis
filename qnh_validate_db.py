@@ -15,7 +15,6 @@ import pymysql
 
 import qnh_capture_common as C
 
-DB_CONFIG = os.path.expanduser("~/.claude/skills/qnh-database/db_config.json")
 DATABASE = "retail_price_snapshot"
 
 
@@ -461,7 +460,7 @@ def main():
     snapshot_id = args.snapshot_id or (manifest or {}).get("capture_id")
     if not csv_path or not snapshot_id:
         parser.error("需要 CSV + --snapshot-id，或 --manifest")
-    with open(DB_CONFIG, encoding="utf-8") as fh:
+    with open(C.db_config_path(), encoding="utf-8") as fh:
         cfg = json.load(fh)
     conn = pymysql.connect(
         host=cfg["host"], port=cfg["port"], user=cfg["user"], password=cfg["password"],

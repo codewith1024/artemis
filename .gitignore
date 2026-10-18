@@ -118,6 +118,7 @@ ehthumbs.db
 Thumbs.db
 
 # qnh_product_scan.py 的产出：店铺业务数据和录像，不进版本库
+.qnh_db_config.json
 qnh_scan_*.csv
 qnh_scan_*.mp4
 qnh_scan_*.mkv

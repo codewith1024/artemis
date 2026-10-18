@@ -17,6 +17,10 @@ from decimal import Decimal, InvalidOperation
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PROFILE_FILE = os.path.join(ROOT, "config", "qnh_capture_profiles.json")
+DEFAULT_DB_CONFIG_FILES = (
+    os.path.join(ROOT, ".qnh_db_config.json"),
+    os.path.expanduser("~/.claude/skills/qnh-database/db_config.json"),
+)
 MANIFEST_SCHEMA_VERSION = 1
 SEGMENT_MODE = "leaf_categories"
 PROFILE_SCHEMA_VERSION = 1
@@ -61,6 +65,15 @@ PURCHASE_PAT = re.compile(r"^(\d+(?:\.\d+)?)(?:/(\S+))?$")
 
 class CaptureContractError(ValueError):
     pass
+
+
+def db_config_path():
+    configured = os.environ.get("QNH_DB_CONFIG")
+    candidates = (os.path.expanduser(configured),) if configured else DEFAULT_DB_CONFIG_FILES
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError("数据库配置不存在：" + " 或 ".join(candidates))
 
 
 @dataclass

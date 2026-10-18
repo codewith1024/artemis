@@ -31,6 +31,31 @@ def carry_row(index=1, name="商品A", barcode="6900000000001", prefix=""):
     return row
 
 
+class DatabaseConfigTests(unittest.TestCase):
+    def test_project_config_precedes_legacy_and_env_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = os.path.join(directory, "project.json")
+            legacy = os.path.join(directory, "legacy.json")
+            override = os.path.join(directory, "override.json")
+            for path in (project, legacy, override):
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("{}")
+            original_candidates = C.DEFAULT_DB_CONFIG_FILES
+            original_override = os.environ.get("QNH_DB_CONFIG")
+            try:
+                C.DEFAULT_DB_CONFIG_FILES = (project, legacy)
+                os.environ.pop("QNH_DB_CONFIG", None)
+                self.assertEqual(C.db_config_path(), project)
+                os.environ["QNH_DB_CONFIG"] = override
+                self.assertEqual(C.db_config_path(), override)
+            finally:
+                C.DEFAULT_DB_CONFIG_FILES = original_candidates
+                if original_override is None:
+                    os.environ.pop("QNH_DB_CONFIG", None)
+                else:
+                    os.environ["QNH_DB_CONFIG"] = original_override
+
+
 class DailyRunnerLockTests(unittest.TestCase):
     def test_runner_lock_is_exclusive_and_reusable(self):
         with tempfile.TemporaryDirectory() as directory:
