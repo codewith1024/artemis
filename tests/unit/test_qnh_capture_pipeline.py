@@ -232,6 +232,28 @@ class ProductIdentityTests(unittest.TestCase):
             mock.call("节庆礼品", all_keys, 8.0),
         ])
 
+    def test_category_selection_scrolls_left_rail_for_hidden_leaf(self):
+        product = {"title": "旧商品", "barcode": "", "spec": ""}
+        target_nodes = [{"screen": "target"}]
+        with mock.patch.object(scan, "dump_xml",
+                               side_effect=["initial", "after-top", "hidden", "visible"]), \
+                mock.patch.object(scan, "parse_nodes", return_value=[{"y2": 1000}]), \
+                mock.patch.object(scan, "detect_watermarks", return_value=set()), \
+                mock.patch.object(scan, "find_products", return_value=[product]), \
+                mock.patch.object(scan, "selected_list_count", return_value=None), \
+                mock.patch.object(scan, "tap_text_xml", return_value=True), \
+                mock.patch.object(scan, "find_click_target_xml",
+                                  side_effect=[None, None, (1, 1, 2, 2)]), \
+                mock.patch.object(scan, "helper_action", return_value=True) as action, \
+                mock.patch.object(scan.HelperState, "has_semantic_scroll", True), \
+                mock.patch.object(scan, "wait_category_list_refresh",
+                                  return_value=(457, target_nodes)), \
+                mock.patch.object(scan.time, "time", side_effect=[0.0, 0.0, 0.1, 0.2]), \
+                mock.patch.object(scan.time, "sleep"):
+            result = scan.select_category_path("家居日用/厨具餐具")
+        self.assertEqual(result, (457, target_nodes))
+        action.assert_called_once_with("scroll_at", x=110, y=820, direction="forward")
+
     def test_category_selection_guard_requires_leaf_count_title(self):
         nodes = [
             {**node("薯片薯条（169）", 230, 260, 1000, 310), "clickable": False,

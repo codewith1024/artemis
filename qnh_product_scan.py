@@ -2919,13 +2919,29 @@ def select_category_path(category, timeout=8.0):
         if not tap_text_xml(top, max_x=260, min_y=220, force_adb=True):
             raise C.CaptureContractError(f"找不到一级类目：{top}")
         deadline = time.time() + timeout
+        scroll_attempts = 0
         while time.time() < deadline:
             xml = dump_xml()
             if find_click_target_xml(xml, leaf, max_x=260, min_y=220) is not None:
                 break
+            # Expanded leaf lists can extend below the left-panel viewport (verified
+            # for 家居日用/厨具餐具). Scroll only inside the category rail; never the
+            # product list. A short semantic/gesture scroll reveals the next leaves.
+            if scroll_attempts < 4:
+                nodes = parse_nodes(xml)
+                panel_h = max((n["y2"] for n in nodes), default=screen_size()[1])
+                helper_result = (helper_action(
+                    "scroll_at", x=110, y=int(panel_h * 0.82), direction="forward")
+                                 if HelperState.has_semantic_scroll else False)
+                if helper_result is False:
+                    sh(f"input swipe 110 {int(panel_h * 0.92)} 110 "
+                       f"{int(panel_h * 0.66)} 350")
+                scroll_attempts += 1
+                time.sleep(0.65)
+                continue
             time.sleep(0.35)
         else:
-            raise C.CaptureContractError(f"一级类目未展开：{top}")
+            raise C.CaptureContractError(f"一级类目未展开或叶子不可见：{category}")
     elif len(parts) == 1 and find_click_target_xml(xml, top, max_x=260, min_y=220) is None:
         raise C.CaptureContractError(f"找不到一级类目：{top}")
     if len(parts) == 2:
