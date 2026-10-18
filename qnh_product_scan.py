@@ -1471,10 +1471,11 @@ def load_carry_baseline(path):
 
 
 def compare_card_baseline(card, baseline_entry):
-    """今日卡片 vs 基线：一级触发字段全一致 → 返回携带详情列，否则 None。
+    """今日卡片 vs 基线：价格/规格/活动品一致时携带详情列。
 
-    触发字段即用户拍板的口径：三渠道价格、采购价、售罄、规格、活动品。
-    月售/库存不计触发（二级变化，卡片今日值经 CTX.cards 照常入 CSV）。
+    月售、库存及售罄状态均来自今日列表卡，变化不需要打开详情页；详情专属
+    的分渠道库存/上架状态沿用基线，并由周期全量刷新。价格、规格和活动品
+    仍严格触发详情。
     """
     p = card["prices"]
     split = len(p) == CARD_PRICE_ROWS
@@ -1489,7 +1490,7 @@ def compare_card_baseline(card, baseline_entry):
     # example combo purchase prices parsed from a channel retail row). Unknown never
     # triggers; every concrete baseline value remains strict.
     baseline = baseline_entry["fingerprint"]
-    for field in ("spec", "sold_out", "promo_item"):
+    for field in ("spec", "promo_item"):
         if today[field] != baseline[field]:
             return None
     for current, previous in zip(today["prices"], baseline["prices"]):

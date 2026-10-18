@@ -173,19 +173,18 @@ class CarryCompareTests(unittest.TestCase):
         self.assertIsNone(scan.compare_card_baseline(
             today, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
 
-    def test_stock_and_month_change_do_not_trigger(self):
-        # 二级变化：只改库存/月售，指纹只看一级字段 → 仍携带（今日值经卡片入 CSV）
+    def test_stock_month_and_sold_out_changes_do_not_trigger(self):
+        # 今日列表卡已经提供月售/库存/售罄；详情专属字段由周期全量刷新。
         import qnh_product_scan as scan
         base = self.make_card(["45", "50", "55", "3.5"])
-        today = dict(base, month_sales="999", stock="1")
+        today = dict(base, month_sales="999", stock="", sold_out=True)
         self.assertIsNotNone(scan.compare_card_baseline(
             today, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
 
-    def test_sold_out_or_spec_or_promo_triggers(self):
+    def test_spec_or_promo_triggers(self):
         import qnh_product_scan as scan
         base = self.make_card(["45", "50", "55", "3.5"])
-        for variant in (dict(base, sold_out=True), dict(base, spec="200g"),
-                        dict(base, promo_item=True)):
+        for variant in (dict(base, spec="200g"), dict(base, promo_item=True)):
             self.assertIsNone(scan.compare_card_baseline(
                 variant, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
 
