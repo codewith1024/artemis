@@ -2844,7 +2844,7 @@ def reset_category_to_top(category):
     """Switch to 全部商品 and back so MRN resets the target leaf list to top."""
     before_nodes, before_products = dump_products()
     before_keys = {product_identity(product) for product in before_products}
-    if not tap_text_xml("全部商品", max_x=260, min_y=220, force_adb=True):
+    if not tap_text_xml("全部商品", max_x=260, min_y=220):
         return [], []
     if not wait_category_list_refresh("全部商品", before_keys, 8.0):
         return [], []
@@ -2906,7 +2906,7 @@ def select_category_path(category, timeout=8.0):
     before_keys = {product_identity(product) for product in before_products}
     current_count = selected_list_count(before_nodes, leaf)
     if current_count is not None:
-        if not tap_text_xml("全部商品", max_x=260, min_y=220, force_adb=True):
+        if not tap_text_xml("全部商品", max_x=260, min_y=220):
             raise C.CaptureContractError(f"目标类目已选中但无法切出重置：{category}")
         refreshed = wait_category_list_refresh("全部商品", before_keys, timeout)
         if not refreshed:
@@ -2916,7 +2916,7 @@ def select_category_path(category, timeout=8.0):
         before_keys = {product_identity(product) for product in before_products}
         xml = dump_xml()
     if len(parts) == 2 and find_click_target_xml(xml, leaf, max_x=260, min_y=220) is None:
-        if not tap_text_xml(top, max_x=260, min_y=220, force_adb=True):
+        if not tap_text_xml(top, max_x=260, min_y=220):
             raise C.CaptureContractError(f"找不到一级类目：{top}")
         deadline = time.time() + timeout
         scroll_attempts = 0
@@ -2947,13 +2947,13 @@ def select_category_path(category, timeout=8.0):
     if len(parts) == 2:
         for _ in range(3):
             time.sleep(0.8)
-            if not tap_text_xml(leaf, max_x=260, min_y=220, force_adb=True):
+            if not tap_text_xml(leaf, max_x=260, min_y=220):
                 continue
             refreshed = wait_category_list_refresh(leaf, before_keys, timeout)
             if refreshed:
                 return refreshed
         raise C.CaptureContractError(f"选择类目后未读到标题计数：{category}")
-    if not tap_text_xml(top, max_x=260, min_y=220, force_adb=True):
+    if not tap_text_xml(top, max_x=260, min_y=220):
         raise C.CaptureContractError(f"找不到一级类目：{top}")
     deadline = time.time() + timeout
     while time.time() < deadline:
