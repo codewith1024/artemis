@@ -580,6 +580,14 @@ class DetailParsingTests(unittest.TestCase):
         merged = scan.parse_detail([], {"SPU": "1", "美团闪购零售价": "2"})
         self.assertEqual(merged, {"SPU": "1", "美团闪购零售价": "2"})
 
+    def test_high_screen_skips_calibration_for_new_and_resumed_segments(self):
+        # The high-screen path is fixed at n_scroll=0; this assertion guards the
+        # structural condition used by main so new shards do not open a sample detail.
+        source = open(scan.__file__, encoding="utf-8").read()
+        self.assertIn("if sh_ >= 3500:", source)
+        self.assertIn("高屏模式：跳过标定", source)
+        self.assertNotIn("if resume_csv and sh_ >= 3500:", source)
+
     def test_tall_detail_scrolls_until_long_page_other_info_appears(self):
         top = {"SPU": "1", "SKU": "2", "采购单位_详情": "单品",
                "美团闪购状态": "已下架", "饿了么状态": "已下架",

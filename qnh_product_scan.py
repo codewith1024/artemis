@@ -250,6 +250,7 @@ class Ctx:
     carry_details = {}  # 每日增量：指纹一致的行 → 基线详情列（文本原样沿用）
     carry_baseline = None   # --carry-baseline 载入的基线（listing 定位串 → 条目）
     carry_seen = None       # 携带命中的 listing 定位串集合（结束时报未命中数）
+    carry_card_deferrals = {}  # 列表卡被屏幕下沿截断时延后一屏再比较（每身份至多一次）
     last_detail_nodes = []  # open_detail 最后一次确认过的详情页节点，避免调用方重复 dump
     last_detail_fingerprint = None
     display_backup = None   # --tall-screen 前的 (size_override, density_override, effective_density)
@@ -3285,18 +3286,17 @@ def main():
         start_recording(video_path)
 
     try:
-        # 高屏整页详情本来就在一屏内（n_scroll 恒 0），断点续跑时不再重复
-        # 打开标定商品：473 次 attempt 每次约 8-15s 纯开销（2026-10-12 审计）。
+        # 高屏整页详情本来就在一屏内（n_scroll 恒 0），无需打开标定商品。
+        # 过去仅续跑跳过，导致每个新分片白开一个详情（184 × 8–15s）。
         # back=None 由 tap_back 的 helper global-back / keyevent 兜底。
-        if resume_csv and sh_ >= 3500:
+        if sh_ >= 3500:
             step("标定详情页")
-            info("高屏续跑：跳过标定（n_scroll=0，back 用系统返回兜底）")
+            info("高屏模式：跳过标定（n_scroll=0，back 用系统返回兜底）")
             si, n_scroll, ok, vals, back = -1, 0, True, [], None
             sample_detail = {}
             first_screen = list(products)
             marks = resume_marks()
-            products = [p for i, p in enumerate(products)
-                        if not is_done(p, marks)]
+            products = [p for p in products if not is_done(p, marks)]
         else:
             step("标定详情页")
             # 标定样本必须是标品：自建商品详情页根本没有目标字段，
@@ -3532,6 +3532,21 @@ def main():
                     marks = resume_marks()
                     products = [p for p in on_screen if not is_done(p, marks)]
                     cursor = 0
+                    continue
+
+            # A known baseline listing whose card is clipped at the viewport edge has
+            # no trustworthy price fingerprint yet. Defer it once so the next scroll
+            # exposes the full card; if it is still incomplete later, visit detail as
+            # the conservative fallback.
+            if (CTX.carry_baseline is not None
+                    and C.listing_identity(target["title"], target["barcode"])
+                    in CTX.carry_baseline
+                    and product_identity(target) not in CTX.cards):
+                identity = product_identity(target)
+                attempts = CTX.carry_card_deferrals.get(identity, 0)
+                if attempts == 0:
+                    CTX.carry_card_deferrals[identity] = 1
+                    cursor += 1
                     continue
 
             done += 1
