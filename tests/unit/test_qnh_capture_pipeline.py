@@ -247,7 +247,8 @@ class ProductIdentityTests(unittest.TestCase):
                 mock.patch.object(scan, "selected_list_count", return_value=None), \
                 mock.patch.object(scan, "tap_text_xml", return_value=True), \
                 mock.patch.object(scan, "find_click_target_xml",
-                                  side_effect=[None, None, (1, 1, 2, 2)]), \
+                                  side_effect=[(1, 1, 2, 2), None, None,
+                                               (1, 1, 2, 2)]), \
                 mock.patch.object(scan, "helper_action", return_value=True) as action, \
                 mock.patch.object(scan.HelperState, "has_semantic_scroll", True), \
                 mock.patch.object(scan, "wait_category_list_refresh",
