@@ -27,6 +27,47 @@ OK, FAILED, SKIPPED = "ok", "failed", "skipped"
 CHILD_PIDS = []   # 当前子进程 PID（写入状态文件，供巡检会话精确清理）
 
 
+def result_matching(out_dir, predicate):
+    """Return the newest result satisfying predicate, ignoring later failures."""
+    import glob
+    for path in reversed(sorted(glob.glob(os.path.join(
+            out_dir, "qnh_category_full_*.result.json")))):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                result = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if predicate(result):
+            return path, result
+    return None
+
+
+def committed_result(out_dir):
+    return result_matching(out_dir, lambda result: (
+        result.get("ok") is True
+        and result.get("committed") is True
+        and result.get("state") == "committed"
+        and (result.get("post_validation") or {}).get("ok") is True))
+
+
+def dry_run_result(out_dir):
+    return result_matching(out_dir, lambda result: (
+        result.get("ok") is True
+        and result.get("committed") is False
+        and result.get("state") == "dry_run_rolled_back"))
+
+
+def completed_status(result_path, result):
+    return {
+        "state": OK,
+        "stage": "done",
+        **{key: result.get(key) for key in
+           ("snapshot_id", "batch_id", "status", "rows", "fact_rows",
+            "new_matches", "committed", "post_validation", "manifest_path")},
+        "result_path": result_path,
+    }
+
+
 def acquire_runner_lock():
     path = os.path.join(ROOT, "qnh_daily", ".runner.lock")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -105,6 +146,12 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     log_path = os.path.join(out_dir, "daily.log")
     baseline_path = os.path.join(ROOT, "qnh_daily", "carry_baseline.json")
+    completed = committed_result(out_dir)
+    if completed:
+        result_path, result = completed
+        status = write_status(out_dir, **completed_status(result_path, result))
+        print(f"[daily] 该日期已成功提交，无需重跑：{status}")
+        return
     try:
         runner_lock = acquire_runner_lock()
     except RuntimeError as exc:
@@ -154,21 +201,16 @@ def main():
                          resume_hint=f"重跑同一命令即可断点续跑（capture.state.json 在 {out_dir}）")
             raise SystemExit(3)
 
-    # 成功：从聚合 result 提取快照摘要。
-    summary = {"state": OK, "stage": "done"}
-    result_glob = os.path.join(out_dir, "qnh_category_full_*.result.json")
-    import glob
-    results = sorted(glob.glob(result_glob))
-    if results:
-        try:
-            with open(results[-1], encoding="utf-8") as fh:
-                payload = json.load(fh)
-            summary.update({key: payload.get(key) for key in
-                            ("snapshot_id", "status", "rows", "fact_rows",
-                             "new_matches", "committed", "state")})
-        except (OSError, json.JSONDecodeError):
-            pass
-    status = write_status(out_dir, **summary)
+    # 成功：正式运行必须已提交且 post-validation PASS；dry-run 必须已回滚。
+    completed = dry_run_result(out_dir) if args.no_commit else committed_result(out_dir)
+    if not completed:
+        expected = ("dry_run_rolled_back result" if args.no_commit else
+                    "committed + post-validation PASS result")
+        write_status(out_dir, state=FAILED, stage="finalize",
+                     error=f"采集进程成功退出，但未找到 {expected}")
+        raise SystemExit(3)
+    result_path, result = completed
+    status = write_status(out_dir, **completed_status(result_path, result))
     print(f"[daily] 完成：{status}")
 
 

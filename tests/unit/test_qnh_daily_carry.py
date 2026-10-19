@@ -3,11 +3,15 @@
 import csv
 import json
 import os
+import plistlib
+import subprocess
 import tempfile
 import unittest
 import uuid
+from unittest import mock
 
 import qnh_capture_common as C
+import qnh_daily_launch as launch
 import qnh_daily_run as daily
 
 
@@ -70,6 +74,92 @@ class DailyRunnerLockTests(unittest.TestCase):
                 second.close()
             finally:
                 daily.ROOT = original_root
+
+
+class DailyCompletionTests(unittest.TestCase):
+    def write_result(self, directory, stamp, **updates):
+        payload = {
+            "ok": True, "committed": True, "state": "committed",
+            "snapshot_id": "snapshot-ok", "batch_id": "batch-ok",
+            "status": "success", "rows": 10, "fact_rows": 30,
+            "new_matches": 2, "manifest_path": "/tmp/final.manifest.json",
+            "post_validation": {"ok": True, "passed": 19, "failed": 0},
+        }
+        payload.update(updates)
+        path = os.path.join(directory, f"qnh_category_full_{stamp}.result.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        return path, payload
+
+    def test_committed_result_ignores_later_failed_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            expected = self.write_result(directory, "20261019-133718")
+            self.write_result(directory, "20261019-143245", ok=False,
+                              committed=None, state="load_failed_or_commit_unknown",
+                              post_validation={})
+            self.assertEqual(daily.committed_result(directory), expected)
+
+    def test_dry_run_result_accepts_successful_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            expected = self.write_result(
+                directory, "20261019-133718", committed=False,
+                state="dry_run_rolled_back", post_validation=None)
+            self.assertEqual(daily.dry_run_result(directory), expected)
+            self.assertIsNone(daily.committed_result(directory))
+
+    def test_main_restores_completed_status_without_touching_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_date = "20261018"
+            out_dir = os.path.join(directory, "qnh_daily", run_date)
+            os.makedirs(out_dir)
+            result_path, result = self.write_result(out_dir, "20261019-133718")
+            original_root = daily.ROOT
+            daily.ROOT = directory
+            try:
+                with mock.patch.object(daily, "adb", side_effect=AssertionError("ADB called")), \
+                     mock.patch.object(daily, "acquire_runner_lock",
+                                       side_effect=AssertionError("lock acquired")), \
+                     mock.patch("sys.argv", ["qnh_daily_run.py", "--date", run_date]):
+                    daily.main()
+            finally:
+                daily.ROOT = original_root
+            with open(os.path.join(out_dir, "daily.status.json"), encoding="utf-8") as fh:
+                status = json.load(fh)
+            self.assertEqual(status, {
+                "updated_at": status["updated_at"],
+                **daily.completed_status(result_path, result),
+            })
+
+
+class DailyLaunchTests(unittest.TestCase):
+    def test_plist_is_explicitly_one_shot(self):
+        payload = launch.plist_for("20261020")
+        self.assertIs(payload["RunAtLoad"], True)
+        self.assertIs(payload["KeepAlive"], False)
+        self.assertEqual(payload["Label"], "com.jalen.qnh.daily.20261020")
+        self.assertIn("qnh_daily_run.py --date 20261020",
+                      payload["ProgramArguments"][-1])
+
+    def test_start_bootstraps_plist_instead_of_submit(self):
+        calls = []
+
+        def fake_launchctl(*args):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 1 if args[0] == "print" else 0,
+                                               stdout="", stderr="not found")
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(launch, "ROOT", directory), \
+             mock.patch.object(launch, "_launchctl", side_effect=fake_launchctl):
+            launch.start("20261020")
+            _, plist_path = launch.paths_for("20261020")
+            with open(plist_path, "rb") as fh:
+                payload = plistlib.load(fh)
+        self.assertEqual(calls, [
+            ("print", f"gui/{os.getuid()}/com.jalen.qnh.daily.20261020"),
+            ("bootstrap", f"gui/{os.getuid()}", plist_path),
+        ])
+        self.assertIs(payload["KeepAlive"], False)
 
 
 class CarryStatusTests(unittest.TestCase):
