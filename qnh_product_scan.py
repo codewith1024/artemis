@@ -2909,6 +2909,31 @@ def wait_category_list_refresh(leaf, before_keys, timeout):
     return None
 
 
+def scroll_category_rail_once(xml):
+    """Scroll the left category rail one page; return whether an action was issued."""
+    nodes = parse_nodes(xml)
+    panel_h = max((n["y2"] for n in nodes), default=screen_size()[1])
+    result = (helper_action("scroll_at", x=110, y=int(panel_h * 0.82),
+                            direction="forward")
+              if HelperState.has_semantic_scroll else False)
+    if result is False:
+        sh(f"input swipe 110 {int(panel_h * 0.92)} 110 {int(panel_h * 0.66)} 350")
+    time.sleep(0.65)
+    return result is not None
+
+
+def reveal_category_text(text, xml, *, max_scrolls=8):
+    """Reveal a hidden top/leaf label by scrolling only the category rail."""
+    for attempt in range(max_scrolls + 1):
+        if find_click_target_xml(xml, text, max_x=260, min_y=90) is not None:
+            return xml
+        if attempt == max_scrolls:
+            break
+        scroll_category_rail_once(xml)
+        xml = dump_xml()
+    return None
+
+
 def select_category_path(category, timeout=8.0):
     """Select 一级/叶子 on the left category panel and return its live product count."""
     if not category:
@@ -2933,39 +2958,35 @@ def select_category_path(category, timeout=8.0):
         before_products = find_products(before_nodes, detect_watermarks(before_nodes))
         before_keys = {product_identity(product) for product in before_products}
         xml = dump_xml()
-    if len(parts) == 2 and find_click_target_xml(xml, leaf, max_x=260, min_y=220) is None:
-        if not tap_text_xml(top, max_x=260, min_y=220):
+    top_visible = reveal_category_text(top, xml)
+    if top_visible is None:
+        raise C.CaptureContractError(f"找不到一级类目：{top}")
+    xml = top_visible
+    if len(parts) == 2 and find_click_target_xml(xml, leaf, max_x=260, min_y=90) is None:
+        if not tap_text_xml(top, max_x=260, min_y=90):
             raise C.CaptureContractError(f"找不到一级类目：{top}")
         deadline = time.time() + timeout
         scroll_attempts = 0
         while time.time() < deadline:
             xml = dump_xml()
-            if find_click_target_xml(xml, leaf, max_x=260, min_y=220) is not None:
+            if find_click_target_xml(xml, leaf, max_x=260, min_y=90) is not None:
                 break
             # Expanded leaf lists can extend below the left-panel viewport (verified
             # for 家居日用/厨具餐具). Scroll only inside the category rail; never the
             # product list. A short semantic/gesture scroll reveals the next leaves.
             if scroll_attempts < 4:
-                nodes = parse_nodes(xml)
-                panel_h = max((n["y2"] for n in nodes), default=screen_size()[1])
-                helper_result = (helper_action(
-                    "scroll_at", x=110, y=int(panel_h * 0.82), direction="forward")
-                                 if HelperState.has_semantic_scroll else False)
-                if helper_result is False:
-                    sh(f"input swipe 110 {int(panel_h * 0.92)} 110 "
-                       f"{int(panel_h * 0.66)} 350")
+                scroll_category_rail_once(xml)
                 scroll_attempts += 1
-                time.sleep(0.65)
                 continue
             time.sleep(0.35)
         else:
             raise C.CaptureContractError(f"一级类目未展开或叶子不可见：{category}")
-    elif len(parts) == 1 and find_click_target_xml(xml, top, max_x=260, min_y=220) is None:
+    elif len(parts) == 1 and find_click_target_xml(xml, top, max_x=260, min_y=90) is None:
         raise C.CaptureContractError(f"找不到一级类目：{top}")
     if len(parts) == 2:
         for _ in range(3):
             time.sleep(0.8)
-            if not tap_text_xml(leaf, max_x=260, min_y=220):
+            if not tap_text_xml(leaf, max_x=260, min_y=90):
                 continue
             refreshed = wait_category_list_refresh(leaf, before_keys, timeout)
             if refreshed:
