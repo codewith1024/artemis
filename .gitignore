@@ -143,3 +143,5 @@ qnh_acceptance/**/*.skus.json
 qnh_acceptance/**/qnh_category_full_*.manifest.json
 qnh_acceptance/**/inventory.json
 qnh_acceptance/**/capture.state.json
+# 例外：分析产物（类目 SKU 分布）要入库，它是报告引用的表。
+!qnh_acceptance/**/sku_distribution/*.csv

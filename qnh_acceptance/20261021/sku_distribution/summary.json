@@ -1,0 +1,16 @@
+{
+  "captured_sku_count": 10491,
+  "captured_spu_count": 10491,
+  "classes": 184,
+  "classes_with_multi_sku_rows": 0,
+  "multi_classes": [],
+  "raw_record_count": 10857,
+  "snapshot_hour": "2026-10-20 00:00:00",
+  "snapshot_id": "f8a0aeba-f60f-4e33-8856-d89a6fc1bcc6",
+  "status": "success",
+  "total_listings": 10491,
+  "total_multi_rows": 0,
+  "total_skus": 10429,
+  "total_spus": 10429,
+  "total_unknown_cells": 0
+}

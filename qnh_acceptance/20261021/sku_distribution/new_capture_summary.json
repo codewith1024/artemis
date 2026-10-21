@@ -1,0 +1,31 @@
+{
+  "segments": [
+    {
+      "cards": 51,
+      "l1": "萌宠专区",
+      "l2": "猫粮",
+      "multi_cards": 10,
+      "multi_skus": 24,
+      "sku_minus_card": 14,
+      "skus": 65,
+      "spus": 51
+    },
+    {
+      "cards": 43,
+      "l1": "萌宠专区",
+      "l2": "猫零食",
+      "multi_cards": 2,
+      "multi_skus": 6,
+      "sku_minus_card": 4,
+      "skus": 47,
+      "spus": 43
+    }
+  ],
+  "totals": {
+    "cards": 94,
+    "multi_cards": 12,
+    "multi_skus": 30,
+    "skus": 112,
+    "spus": 94
+  }
+}
