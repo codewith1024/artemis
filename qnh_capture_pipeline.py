@@ -143,7 +143,15 @@ def _restart_hint(args):
 
 
 def _post_validate(manifest_path, result):
-    gate = C.validate_manifest(manifest_path, require_complete=True)
+    # 观测终态产物按宽松门禁复核：它不是「业务完整」的快照，但入库是允许的
+    # （未知的渠道格记 unknown，快照状态 partial）。严格门禁仍然会说它不完整。
+    observed = False
+    try:
+        manifest = C.read_json(manifest_path)
+        observed = manifest.get("state") == C.OBSERVED_MANIFEST_STATE
+    except Exception:
+        observed = False
+    gate = C.validate_manifest(manifest_path, require_complete=not observed)
     if not gate.ok:
         raise C.CaptureContractError(C.format_gate_report(gate))
     manifest = gate.manifest
@@ -351,37 +359,47 @@ def main():
         gate = C.validate_manifest(
             manifest_path, require_complete=True, expected_profile=profile)
         _print_gate(gate)
+        observed_snapshot = False
         if not gate.ok:
             relaxed = C.validate_manifest(
                 manifest_path, require_complete=False, expected_profile=profile)
-            result = {
-                "ok": False,
-                "state": "gate_failed",
-                "manifest_path": manifest_path,
-                "manifest_sha256": gate.manifest_sha256,
-                "gate": gate.as_dict(),
-                "scan_exit_code": scan_exit,
-            }
-            if _is_aggregate(relaxed.manifest):
-                # 聚合产物（叶子类目分片的并集）不是一次采集：续跑/重采的起点
-                # 都是单个类目的采集产物，给聚合发采集命令只会报错。指向分片器
-                # 的观测模式。
-                result["restart_command"] = shlex.join([
-                    sys.executable, os.path.join(ROOT, "qnh_category_pipeline.py"),
-                    "--observe-exceptions", "--capture-only",
-                ])
-                guidance = ("未触碰数据库。该 manifest 是分片聚合产物，不可续跑、"
-                            "不可入库：请用分片器的观测模式重采异常分片后重新聚合：\n"
-                            + result["restart_command"])
-            elif relaxed.ok and relaxed.row_count > 0:
-                result["resume_command"] = _resume_hint(manifest_path, args)
-                guidance = "未触碰数据库。续跑命令：\n" + result["resume_command"]
-            else:
-                result["restart_command"] = _restart_hint(args)
-                guidance = "未触碰数据库。该 manifest 不可续跑，请重新采集：\n" + result["restart_command"]
-            C.atomic_write_json(_result_path(manifest_path), result)
-            print(guidance)
-            raise SystemExit(2)
+            # 观测终态（observed_with_exceptions）：业务不完整，但可以入库——
+            # 未知的渠道格按 sale_status='unknown' 落库，快照状态记 partial，
+            # 例外清单写进 error_message。严格门禁仍然拒绝它（不完整性不被
+            # 掩盖），只是不再挡住入库。
+            observed_snapshot = bool(
+                relaxed.ok
+                and (relaxed.manifest or {}).get("state") == C.OBSERVED_MANIFEST_STATE)
+            if not observed_snapshot:
+                result = {
+                    "ok": False,
+                    "state": "gate_failed",
+                    "manifest_path": manifest_path,
+                    "manifest_sha256": gate.manifest_sha256,
+                    "gate": gate.as_dict(),
+                    "scan_exit_code": scan_exit,
+                }
+                if _is_aggregate(relaxed.manifest):
+                    # 聚合产物（叶子类目分片的并集）不是一次采集：续跑/重采的起点
+                    # 都是单个类目的采集产物，给聚合发采集命令只会报错。指向分片器
+                    # 的观测模式。
+                    result["restart_command"] = shlex.join([
+                        sys.executable, os.path.join(ROOT, "qnh_category_pipeline.py"),
+                        "--observe-exceptions", "--capture-only",
+                    ])
+                    guidance = ("未触碰数据库。该 manifest 是分片聚合产物，不可续跑、"
+                                "不可入库：请用分片器的观测模式重采异常分片后重新聚合：\n"
+                                + result["restart_command"])
+                elif relaxed.ok and relaxed.row_count > 0:
+                    result["resume_command"] = _resume_hint(manifest_path, args)
+                    guidance = "未触碰数据库。续跑命令：\n" + result["resume_command"]
+                else:
+                    result["restart_command"] = _restart_hint(args)
+                    guidance = "未触碰数据库。该 manifest 不可续跑，请重新采集：\n" + result["restart_command"]
+                C.atomic_write_json(_result_path(manifest_path), result)
+                print(guidance)
+                raise SystemExit(2)
+            print("观测终态产物：业务不完整，按 partial 快照入库（未知的渠道格记 unknown）")
 
         result_path = _result_path(manifest_path)
         recovery_command = shlex.join([

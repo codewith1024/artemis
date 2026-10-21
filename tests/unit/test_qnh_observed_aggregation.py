@@ -26,6 +26,7 @@ import qnh_capture_pipeline as pipeline
 import qnh_category_pipeline as category_pipeline
 import qnh_load_db as loader
 import qnh_sku_capture as K
+import qnh_validate_db as validator
 from qnh_observation import parse_nodes
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -48,6 +49,13 @@ LIST_CARD = """    <node bounds="[380,{top}][1000,{bottom}]" class="android.view
       <node text="规格：{spec}" bounds="[380,{top}][900,{bottom}]" class="android.widget.TextView"/>
       <node text="条码:{barcode}" bounds="[380,{top}][900,{bottom}]" class="android.widget.TextView"/>
     </node>"""
+
+
+def _validation_report():
+    """一份「全部通过」的校验报告（假库校验不在这里跑）。"""
+    report = validator.ValidationReport()
+    report.check("假校验", True, "")
+    return report
 
 
 def list_evidence_for(directory, cards, *, leaf, category, platform_count):
@@ -571,35 +579,26 @@ class ObservedListEvidenceTests(ObservedAggregationCase):
 
 
 class ObservedAggregateLoaderTests(ObservedAggregationCase):
-    """观测终态聚合不许入库：连库之前就拒。"""
+    """观测终态聚合现在可以入库：未知渠道格记 unknown，快照状态记 partial。
 
-    def test_loader_rejects_observed_aggregate_before_connecting(self):
-        opened = []
+    严格门禁仍然拒绝它（聚合不是「业务完整」的快照）——入库放行的是数据，
+    不是完整性声明。
+    """
 
-        def boom():
-            opened.append(True)
-            raise AssertionError("loader 不该连接数据库")
+    def test_strict_gate_still_rejects_the_observed_aggregate(self):
+        with tempfile.TemporaryDirectory() as root:
+            path, _ = self.observed_count_segment(root)
+            state_path = self.make_state(root, {"1": (path, 52)})
+            segments = [{"order": 1, "top": "萌宠专区", "leaf": "猫粮",
+                         "expected_count": 52}]
+            manifest_path = self.merge(root, segments, state_path, full_count=51)
+            strict = C.validate_manifest(manifest_path, require_complete=True,
+                                         expected_profile=C.load_profile(PROFILE))
+            self.assertFalse(strict.ok)
+            self.assertTrue(any("不是 success" in error for error in strict.errors),
+                            strict.errors)
 
-        original = loader._open_connection
-        loader._open_connection = boom
-        try:
-            with tempfile.TemporaryDirectory() as root:
-                path, _ = self.observed_count_segment(root)
-                state_path = self.make_state(root, {"1": (path, 52)})
-                segments = [{"order": 1, "top": "萌宠专区", "leaf": "猫粮",
-                             "expected_count": 52}]
-                manifest_path = self.merge(root, segments, state_path,
-                                           full_count=51)
-                with self.assertRaises(C.CaptureContractError) as ctx:
-                    loader.load_capture(manifest_path=manifest_path)
-                self.assertIn("观测契约产物不入库", str(ctx.exception))
-        finally:
-            loader._open_connection = original
-        self.assertEqual(opened, [])
-
-    def test_capture_pipeline_refuses_aggregate_and_points_at_the_sharder(self):
-        # 聚合产物不是一次采集：既不能续跑也不该被建议「重新采集一次」，
-        # 得指向分片器的观测模式。
+    def test_capture_pipeline_sends_the_observed_aggregate_to_the_loader(self):
         with tempfile.TemporaryDirectory() as root:
             path, _ = self.observed_count_segment(root)
             state_path = self.make_state(root, {"1": (path, 52)})
@@ -610,15 +609,16 @@ class ObservedAggregateLoaderTests(ObservedAggregationCase):
                     "--from-manifest", manifest_path]
             with mock.patch.object(sys, "argv", argv), \
                  mock.patch.object(pipeline.loader, "load_capture") as load_capture:
-                with self.assertRaises(SystemExit) as raised:
+                load_capture.return_value = {"ok": True, "snapshot_id": "s",
+                                             "batch_id": "b", "status": "partial",
+                                             "rows": 51, "fact_rows": 153,
+                                             "new_matches": 0, "committed": True,
+                                             "validation": {"ok": True}}
+                with mock.patch.object(pipeline, "_post_validate") as post:
+                    post.return_value = _validation_report()
                     pipeline.main()
-            self.assertEqual(raised.exception.code, 2)
-            load_capture.assert_not_called()
-            with open(pipeline._result_path(manifest_path), encoding="utf-8") as fh:
-                result = json.load(fh)
-            self.assertNotIn("resume_command", result)
-            self.assertIn("qnh_category_pipeline.py", result["restart_command"])
-            self.assertIn("--observe-exceptions", result["restart_command"])
+            # 观测终态聚合：不再被门禁挡在入库之前。
+            load_capture.assert_called_once()
 
 
 REAL_ROOT = Path(__file__).parents[2] / "qnh_acceptance" / "20261021" / "observations"

@@ -1126,11 +1126,12 @@ def main():
                              "（observed_with_exceptions，证据留在 manifest 里），"
                              "业务完整性仍不通过")
     args = parser.parse_args()
-    if args.observe_exceptions and not args.capture_only:
-        # 先于任何操作失败：不建目录、不连设备。
-        parser.error("--observe-exceptions 只能与 --capture-only 一起使用")
     if args.observe_exceptions and args.commit:
-        parser.error("--observe-exceptions 与 --commit 互斥")
+        # 观测模式现在可以入库：未知的渠道格按 sale_status='unknown' 落库，
+        # 快照状态记 partial，例外清单写进 error_message。聚合是全店并集，
+        # 落一份「带未知的快照」是有意义的；单类目的观测产物仍然只 capture-only
+        # （那不是全店快照，入库会冒充门店快照）。
+        pass
     if args.carry_baseline:
         # 携带行不再入库：进程启动前就停，别白跑 20 轮分片。
         parser.error("--carry-baseline 已停用：携带行详情是历史合成值，"

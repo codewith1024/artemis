@@ -178,6 +178,7 @@ def main():
                      runner_pid=os.getpid(), child_pids=[])
         code = run([sys.executable, os.path.join(ROOT, "qnh_category_pipeline.py"),
                     "--out-dir", out_dir,
+                    "--observe-exceptions",
                     *([] if args.no_commit else ["--commit"]),
                     *([] if args.no_dismiss_dialogs else ["--dismiss-order-dialogs"])],
                    log_fh,

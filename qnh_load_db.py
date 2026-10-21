@@ -43,44 +43,6 @@ def die(message):
     raise SystemExit(f"错误：{message}")
 
 
-def _reject_multi_sku(manifest, rows):
-    """多 SKU 采集产物是 capture-only：进库前就拒，绝不让旧 loader 默读。
-
-    不看 require_complete：只要 manifest 声明了 scope.sku_mode（或 CSV 里出现
-    多SKU 行），这份产物就没有「一行一 SKU」的旧契约，入库必然错位。
-    """
-    scope = (manifest or {}).get("scope") or {}
-    multi_rows = [index for index, row in enumerate(rows or [], 1)
-                  if C.text_value(row.get("状态")) == C.MULTISKU_STATUS]
-    if scope.get("sku_mode") or multi_rows:
-        raise C.CaptureContractError(
-            "多SKU采集产物暂不支持入库："
-            f"scope.sku_mode={scope.get('sku_mode')!r}，多SKU行数={len(multi_rows)}")
-
-
-def _reject_observed_manifest(manifest):
-    """观测契约产物（capture.observation_contract='v1'）不入库。
-
-    例外态 observed_with_exceptions 是「观测完成」，不是「业务完整」：平台标题
-    数与可见卡片数对不上、或有渠道行缺失，这份快照不能当成当日真值写进库。
-    在打开数据库连接之前就拒：连都不连。旧版 partial 显式模式（直接 CSV
-    路径）不受影响。
-    """
-    manifest = manifest or {}
-    capture = manifest.get("capture") or {}
-    if C.text_value(capture.get("observation_contract")) != C.OBSERVATION_CONTRACT_VERSION:
-        return
-    state = C.text_value(manifest.get("state"))
-    if state != "success":
-        raise C.CaptureContractError(
-            f"观测契约产物不入库：state={state!r}（只有 success 可入库）")
-    progress = manifest.get("progress") or {}
-    if progress.get("business_complete") is not True:
-        raise C.CaptureContractError(
-            "观测契约产物不入库：progress.business_complete 不是 true："
-            f"{progress.get('business_complete')!r}")
-
-
 def read_csv(path):
     rows, fields = C.read_csv_rows(path)
     missing = [column for column in BASE_COLUMNS if column not in fields]
@@ -154,8 +116,13 @@ def _open_connection():
 
 def _manifest_context(manifest_path, *, expected_profile=None,
                       profiles_file=C.DEFAULT_PROFILE_FILE):
+    manifest = C.read_json(os.path.abspath(manifest_path))
+    # 观测终态（observed_with_exceptions）不是「业务完整」，但可以入库：未知
+    # 的渠道格按 sale_status='unknown' 落库，快照状态记 partial，例外清单
+    # 记进 error_message。严格门禁仍然拒绝它——「不完整」这件事不会被掩盖。
+    observed = manifest.get("state") == C.OBSERVED_MANIFEST_STATE
     report = C.validate_manifest(
-        manifest_path, require_complete=True, expected_profile=expected_profile)
+        manifest_path, require_complete=not observed, expected_profile=expected_profile)
     if not report.ok:
         raise LoadError(C.format_gate_report(report))
     manifest = report.manifest
@@ -182,7 +149,12 @@ def _manifest_context(manifest_path, *, expected_profile=None,
         "segments": scope.get("segments"),
         "platform_count": int(scope["expected_product_count"]),
         "device": manifest.get("device_id"),
-        "status_override": "success" if manifest["state"] == "success" else "partial",
+        "status_override": ("success" if (manifest["state"] == "success"
+                                           and (manifest.get("progress") or {}).get(
+                                               "business_complete") is not False)
+                            else "partial"),
+        "observed": observed,
+        "observed_exceptions": (manifest.get("progress") or {}).get("exceptions") or [],
         "snapshot_id": manifest["capture_id"],
         "batch_id": manifest["batch_id"],
         "manifest_path": os.path.abspath(manifest_path),
@@ -223,7 +195,7 @@ def _existing_capture_result(conn, context):
             "category_count": context["category_count"],
             "expected_spu_count": context["platform_count"],
             "captured_spu_count": context["row_count"],
-            "captured_sku_count": context["row_count"],
+            "captured_sku_count": context["sku_count"],
             "raw_record_count": context["raw_record_count"],
             "error_message": context["error_message"],
         }
@@ -295,10 +267,12 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
             raw_manifest = C.read_json(os.path.abspath(manifest_path))
         except C.CaptureContractError:
             raw_manifest = {}
-        # 观测契约先判：例外态产物入库的理由要说准（观测终态，不是多 SKU），
-        # 但两种都在连库之前拒。
-        _reject_observed_manifest(raw_manifest)
-        _reject_multi_sku(raw_manifest, None)
+        # 观测终态（observed_with_exceptions）与多 SKU 产物现在都能入库：
+        #   * 多 SKU：sidecar 的子行逐 SKU 成行（sku_count/has_multi_spec 记明）；
+        #   * 观测终态：未知的渠道格按 sale_status='unknown' 落库，快照状态记
+        #     partial，例外清单写进 error_message。
+        # 契约与凭据仍由 manifest 门禁把关（见 _manifest_context）：没有 v1
+        # 契约、例外没凭据的产物进不来。
         context = _manifest_context(
             os.path.abspath(manifest_path), expected_profile=expected_profile,
             profiles_file=profiles_file)
@@ -334,18 +308,22 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
         }
 
     rows = read_csv(context["csv_path"])
-    _reject_multi_sku(context.get("manifest"), rows)
+    manifest = context.get("manifest") or {}
+    # 多 SKU 卡片展开成每个 SKU 一行：卡片行没有 SKU 级字段，入库就是拿代表
+    # SKU 冒充整张卡。sidecar 缺失/结构不对由 manifest 门禁拦截。
+    listings = C.sidecar_listings(manifest)
+    sources = C.fact_sources(rows, listings)
     times = C.row_times(context["csv_path"], rows)
     valid_times = [value for value in times if value]
     if not valid_times:
         raise LoadError("CSV 没有有效采集时间")
     started, finished = min(valid_times), max(valid_times)
-    manifest = context.get("manifest") or {}
     capture_meta = manifest.get("capture") or {}
     started = _parse_dt(capture_meta.get("started_at"), started)
     finished = _parse_dt(capture_meta.get("finished_at"), finished)
 
-    n = len(rows)
+    n = len(rows)                    # 卡片（SPU）数
+    sku_count = len(sources)          # 入库行数（多 SKU 卡按 SKU 计）
     counts = C.status_counts(rows)
     incomplete = {key: value for key, value in counts.items()
                   if key not in C.COMPLETE_ROW_STATUSES}
@@ -356,6 +334,10 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
         reasons.append(f"只采了 {n} 个商品，App 显示 {context['platform_count']} 个")
     if incomplete:
         reasons.append("详情字段未完整：" + "、".join(f"{key}{value}个" for key, value in incomplete.items()))
+    if context.get("observed"):
+        # 例外态入库：业务不完整这件事写进 error_message，不靠 status 猜。
+        for exception in context.get("observed_exceptions") or []:
+            reasons.append("观测例外：" + json.dumps(exception, ensure_ascii=False))
 
     evidence_prefix = C.source_prefix(context["csv_path"])
     video_path = os.path.abspath(video) if video else next(
@@ -367,6 +349,9 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
     segments = context.get("segments") or []
     row_categories = (C.row_category_map(manifest, n) if manifest else
                       [tuple(category_parts)] * n)
+    # 展开后每行要跟自己的卡片同一类目：子行继承父卡的类目。
+    fact_categories = [row_categories[card_index]
+                       for _row, _total, _multi, card_index in sources]
     category_l1, category_l2 = category_parts
     if segments:
         top_names = list(dict.fromkeys(segment["top"] for segment in segments))
@@ -389,8 +374,9 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
         "covered_categories": covered_categories,
         "video_path": video_path,
         "row_count": n,
+        "sku_count": sku_count,
         "raw_record_count": raw_record_count,
-        "fact_row_count": n * len(PRICE_CHANNELS),
+        "fact_row_count": sku_count * len(PRICE_CHANNELS),
         "category_count": category_count,
         "error_message": "；".join(reasons) or None,
     })
@@ -455,7 +441,7 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
                 manifest_sha256=context["manifest_sha256"], csv_sha256=context["csv_sha256"],
                 category_count=category_count,
                 expected_spu_count=context["platform_count"], captured_spu_count=n,
-                captured_sku_count=n, raw_record_count=raw_record_count,
+                captured_sku_count=context["sku_count"], raw_record_count=raw_record_count,
                 error_message=context["error_message"]))
 
             if segments:
@@ -469,6 +455,7 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
                         top_order[top] = len(top_order) + 1
                         insert(cur, "fact_store_category_snapshot", dict(
                             common, category_key=f"name:{top}", category_name=top,
+                            parent_category_key=None,
                             category_level=1, category_order=top_order[top],
                             platform_product_count=sum(item["expected_count"] for item in segments
                                                        if item["top"] == top),
@@ -487,6 +474,7 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
                               store_code=context["store_code"])
                 insert(cur, "fact_store_category_snapshot", dict(
                     common, category_key=f"name:{category_l1}", category_name=category_l1,
+                    parent_category_key=None,
                     category_level=1,
                     platform_product_count=None if category_l2 else context["platform_count"],
                     captured_spu_count=None if category_l2 else n))
@@ -498,9 +486,14 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
                         captured_spu_count=n))
 
             seen = {channel: {} for channel, _ in PRICE_CHANNELS}
-            master_matches = exact_upc_matches(cur, rows)
+            master_matches = exact_upc_matches(cur, [source for source, *_ in sources])
             written = matched = 0
-            for source, collected_at, row_category in zip(rows, times, row_categories):
+            # 每个 SKU 一行（多 SKU 卡的子行才算 SKU）；采集时间与类目跟着
+            # 父卡走——子行与父卡的采集时间本来就该一致。
+            fact_times = [times[card_index]
+                          for _row, _total, _multi, card_index in sources]
+            for (source, sku_total, multi, _card_index), collected_at, row_category in zip(
+                    sources, fact_times, fact_categories):
                 row_category_l1, row_category_l2 = row_category
                 for channel, price_column in PRICE_CHANNELS:
                     key = listing_key(
@@ -508,6 +501,10 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
                         source.get("SKU"), source.get("SPU"))
                     fact_fields = C.fact_fields_from_csv(
                         source, channel, price_column, context["csv_path"])
+                    # 多 SKU 卡的子行带 SPU 的 SKU 数与多规格标记：这一列不写，
+                    # 下游就分不清「一个 SKU」和「一个 SPU 挂 N 个 SKU」。
+                    fact_fields["sku_count"] = sku_total
+                    fact_fields["has_multi_spec"] = 1 if multi else 0
                     # 每行事实的 snapshot_hour 取该行采集时间所在小时；批次小时
                     # 只留在 store_snapshot 上，不套到全部事实行。
                     row_hour = (collected_at.replace(minute=0, second=0, microsecond=0)

@@ -31,6 +31,23 @@ def coverage(list_exhausted=True, rendered_cards=1, captured_cards=1,
     }
 
 
+def sound_coverage(rendered_cards=1, captured_cards=1, cards_match=True,
+                   list_exhausted=True, distinct=True, unresolved=(),
+                   platform_title_count=2, row_count=1):
+    """新口径的覆盖证明：读尽 + 身份一致 + 行数即卡数，三条都要成立。"""
+    return {
+        "list_exhausted": list_exhausted,
+        "end_marker": scan.LIST_END_MARKER,
+        "rendered_cards": rendered_cards,
+        "captured_cards": captured_cards,
+        "row_count": row_count,
+        "cards_match": cards_match,
+        "rows_have_distinct_identities": distinct,
+        "unresolved_specs": list(unresolved),
+        "platform_title_count": platform_title_count,
+    }
+
+
 class CoverageGateTests(unittest.TestCase):
     def make_capture(self, directory, rows, *, expected_count, coverage_block=None):
         prefix = os.path.join(directory, "qnh_scan_20261020-100000")
@@ -248,3 +265,59 @@ class CarryRowGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class SoundCoverageProofTests(CoverageGateTests):
+    """新口径：证明成立时，平台多计的 1 个不是我们漏抓。"""
+
+    def test_shortfall_passes_with_a_sound_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.make_capture(
+                directory, [complete_row(1, "商品A", "6900000000001")],
+                expected_count=2, coverage_block=sound_coverage())
+            report = C.validate_manifest(path, require_complete=True)
+            self.assertTrue(report.ok, report.errors)
+            self.assertFalse(any("商品数不完整" in e for e in report.errors),
+                             report.errors)
+
+    def test_shortfall_fails_when_two_rows_share_one_identity(self):
+        # 同名同规格的两行 = 身份塌成一张，行数不能当卡数用。
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.make_capture(
+                directory, [complete_row(1, "商品A", "6900000000001"),
+                            complete_row(2, "商品A", "6900000000001")],
+                expected_count=3,
+                coverage_block=sound_coverage(rendered_cards=2, captured_cards=1,
+                                              cards_match=False, distinct=False,
+                                              row_count=2))
+            report = C.validate_manifest(path, require_complete=True)
+            self.assertFalse(report.ok)
+            self.assertTrue(any("商品数不完整" in e for e in report.errors), report.errors)
+
+    def test_old_set_only_proof_is_still_rejected(self):
+        # 旧口径（只有 set 相等，没有「行数即卡数」）不被承认。
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.make_capture(
+                directory, [complete_row(1, "商品A", "6900000000001")],
+                expected_count=2, coverage_block=coverage())
+            report = C.validate_manifest(path, require_complete=True)
+            self.assertFalse(report.ok)
+
+    def test_scanner_coverage_snapshot_records_the_proof(self):
+        # 扫描器给出的证明要含新字段，否则门禁无从判断。
+        import qnh_product_scan as scanner
+        saved = (scanner.CTX.parsed_cards, scanner.CTX.orphan_specs,
+                 scanner.CTX.list_end_marker, scanner.CTX.target_count)
+        try:
+            scanner.CTX.parsed_cards = {("100g", "商品A")}
+            scanner.CTX.orphan_specs = set()
+            scanner.CTX.list_end_marker = True
+            scanner.CTX.target_count = 2
+            rows = [{"规格": "100g", "商品名称": "商品A"}]
+            snapshot = scanner.coverage_snapshot(rows)
+        finally:
+            (scanner.CTX.parsed_cards, scanner.CTX.orphan_specs,
+             scanner.CTX.list_end_marker, scanner.CTX.target_count) = saved
+        self.assertTrue(snapshot["rows_have_distinct_identities"])
+        self.assertTrue(snapshot["cards_match"])
+        self.assertEqual(snapshot["row_count"], 1)
+        self.assertTrue(C.coverage_allows_shortfall(snapshot, 2))

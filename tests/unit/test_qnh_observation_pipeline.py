@@ -21,6 +21,7 @@ import uuid
 from unittest import mock
 
 import qnh_capture_common as C
+import qnh_capture_pipeline as capture_pipeline
 import qnh_category_pipeline as category_pipeline
 from tests.unit.test_qnh_manifest_pipeline import complete_row
 
@@ -141,31 +142,28 @@ class FakeProcess:
 class ObserveExceptionsCliTests(unittest.TestCase):
     """--observe-exceptions 只允许 capture-only，且与 --commit 互斥。"""
 
-    def test_observe_exceptions_requires_capture_only(self):
+    def test_observe_exceptions_can_commit_the_aggregate(self):
+        # 聚合是全店并集：观测终态的聚合现在可以入库（未知的渠道格记 unknown，
+        # 快照状态 partial，例外清单写进 error_message）。
         with tempfile.TemporaryDirectory() as root:
             out_dir = os.path.join(root, "out")
             argv = ["qnh_category_pipeline.py", "--segments-file",
                     os.path.join(root, "missing-segments.json"),
-                    "--out-dir", out_dir, "--observe-exceptions"]
+                    "--out-dir", out_dir, "--observe-exceptions", "--commit"]
             with mock.patch.object(sys, "argv", argv):
-                with self.assertRaises(SystemExit) as ctx:
+                # 清单文件不存在 → 读清单就失败（不是参数互斥）。
+                with self.assertRaises(FileNotFoundError):
                     category_pipeline.main()
-            self.assertEqual(ctx.exception.code, 2)
-            # 先于任何操作失败：目录没建、清单没读、设备没碰。
-            self.assertFalse(os.path.exists(out_dir))
 
-    def test_observe_exceptions_rejects_commit(self):
+    def test_single_category_observation_stays_capture_only(self):
+        # 单类目的观测产物不是全店快照：入库会冒充门店快照，所以仍只 capture-only。
         with tempfile.TemporaryDirectory() as root:
             out_dir = os.path.join(root, "out")
-            argv = ["qnh_category_pipeline.py", "--segments-file",
-                    os.path.join(root, "missing-segments.json"),
-                    "--out-dir", out_dir, "--observe-exceptions",
-                    "--capture-only", "--commit"]
+            argv = ["qnh_capture_pipeline.py", "--observe-exceptions", "--commit"]
             with mock.patch.object(sys, "argv", argv):
                 with self.assertRaises(SystemExit) as ctx:
-                    category_pipeline.main()
+                    capture_pipeline.main()
             self.assertEqual(ctx.exception.code, 2)
-            self.assertFalse(os.path.exists(out_dir))
 
     def test_observe_exceptions_passes_allow_observed_and_records_state(self):
         with tempfile.TemporaryDirectory() as root:

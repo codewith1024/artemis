@@ -435,26 +435,23 @@ class RealMultispecFixtureTests(SkuSidecarCase):
             self.assertEqual(report.manifest["progress"]["sku_row_count"], 2)
 
 
-class MultiSkuLoaderRejectionTests(SkuSidecarCase):
-    def test_loader_rejects_multi_sku_manifest_before_connecting(self):
+class MultiSkuLoaderIngestTests(SkuSidecarCase):
+    """多 SKU 产物现在能入库：sidecar 的子行逐 SKU 成行（详见
+    tests/unit/test_qnh_multisku_ingest.py）。这里只钉住两件事：不连库时的
+    拒绝与放行。"""
+
+    def test_loader_no_longer_refuses_a_multi_sku_manifest(self):
         rows = [multi_card_row(1)]
-        opened = []
-
-        def boom():
-            opened.append(True)
-            raise AssertionError("loader 不该连接数据库")
-
-        original = loader._open_connection
-        loader._open_connection = boom
-        try:
-            with tempfile.TemporaryDirectory() as directory:
-                _, _, path = self.build(directory, rows, {"1": self.two_sku_listing()})
-                with self.assertRaises(C.CaptureContractError) as ctx:
-                    loader.load_capture(manifest_path=path)
-                self.assertIn("多SKU采集产物暂不支持入库", str(ctx.exception))
-        finally:
-            loader._open_connection = original
-        self.assertEqual(opened, [])
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, path = self.build(directory, rows, {"1": self.two_sku_listing()})
+            try:
+                loader.load_capture(manifest_path=path)
+            except Exception as exc:
+                message = str(exc)
+            else:
+                message = ""
+            # 不再因为「多 SKU 产物」被拒（这条拒绝已经取消）。
+            self.assertNotIn("多SKU采集产物暂不支持入库", message)
 
     def test_loader_rejects_legacy_csv_with_multisku_row(self):
         opened = []
@@ -472,7 +469,8 @@ class MultiSkuLoaderRejectionTests(SkuSidecarCase):
                 with self.assertRaises(C.CaptureContractError) as ctx:
                     loader.load_capture(csv_path=csv_path, store_name="测试店",
                                         warehouse_id="1")
-                self.assertIn("多SKU采集产物暂不支持入库", str(ctx.exception))
+                # 直接 CSV 模式没有 sidecar 就没法展开多 SKU：必须拒绝。
+                self.assertIn("sidecar", str(ctx.exception))
         finally:
             loader._open_connection = original
         self.assertEqual(opened, [])

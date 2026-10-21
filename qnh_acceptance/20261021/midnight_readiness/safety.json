@@ -1,0 +1,34 @@
+{
+  "active_capture_or_loader": [],
+  "db_connection_or_write": false,
+  "db_connections_opened": 0,
+  "ddl_applied": false,
+  "device": {
+    "ac_powered": true,
+    "adb_state": "",
+    "animation_scales": {
+      "animator": "1",
+      "transition": "1",
+      "window": "1"
+    },
+    "density": "Physical density: 420",
+    "display_power": "Display Power: state=OFF",
+    "screen": "Physical size: 1440x3040\nOverride size: 1080x2280",
+    "touched": false
+  },
+  "historical_20261020_unchanged": true,
+  "note": "本轮全部离线：入库验证走 FakeDB 假库，从不连库；没有 DDL、没有回填、没有 dry-run 入库或正式提交。真机采集产物与历史 20261020 未被改动。",
+  "real_capture_artifacts_unchanged": {
+    "cat_food_csv": true,
+    "cat_snacks_csv": true
+  },
+  "scratch_outputs_outside_project": [
+    "/tmp/qnh-obs-cli",
+    "/tmp/dbg_ingest.py",
+    "/tmp/dbg_ingest2.py",
+    "/tmp/dbg_cov.py",
+    "/tmp/dbg_f2.py",
+    "/tmp/dbg_f3.py",
+    "/tmp/dbg_f4.py"
+  ]
+}

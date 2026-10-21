@@ -55,6 +55,7 @@ import qnh_observation as OBS
 
 import argparse
 import atexit
+from collections import Counter
 from contextlib import contextmanager
 import csv
 import hashlib
@@ -1810,11 +1811,19 @@ def collect_list_observation(category):
 
 
 def coverage_snapshot(rows):
-    """记录已解析身份集合；它不是卡片张数证明，不能用于短收放行。"""
+    """覆盖证明：读到列表末尾 + 看到的身份与采到的身份一致 + 行数即卡数。
+
+    三条都要成立，「平台标题数高于可见卡数」才只是 App 侧口径差：
+    1. list_exhausted：列表读到了末尾（App 的读尽标记）；
+    2. 身份一致：滚动时解析到的身份集合 == 采集行里的身份集合；
+    3. 行数即卡数：采集行里没有两行共享身份——同名同规格的卡会塌成一张，
+       行数不能当卡数用（set 相等不等于张数相等，这是旧证明的坑）。
+    """
     parsed = set(CTX.parsed_cards)
-    captured = {(C.normalize_name(row.get("规格") or ""),
-                 C.normalize_name(row.get("商品名称") or ""))
-                for row in rows}
+    identities = Counter((C.normalize_name(row.get("规格") or ""),
+                          C.normalize_name(row.get("商品名称") or ""))
+                         for row in rows)
+    captured = set(identities)
     parsed_specs = {spec for spec, _ in parsed}
     unresolved = sorted(spec for spec in CTX.orphan_specs if spec not in parsed_specs)
     return {
@@ -1822,10 +1831,11 @@ def coverage_snapshot(rows):
         "end_marker": LIST_END_MARKER,
         "rendered_cards": len(parsed),
         "captured_cards": len(captured),
+        "row_count": len(rows),
         "cards_match": parsed == captured,
+        "rows_have_distinct_identities": len(identities) == len(rows),
         "unresolved_specs": unresolved,
         "platform_title_count": CTX.target_count,
-        "identity_only": True,
     }
 
 

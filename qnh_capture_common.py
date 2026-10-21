@@ -430,6 +430,43 @@ def channel_view(channel: str) -> tuple[str, str]:
         f"未知渠道：{channel!r}；可用：{'、'.join(CHANNEL_VIEW)}")
 
 
+def sidecar_listings(manifest):
+    """manifest 指向的 sidecar 里的多 SKU 子行（卡片序号 -> 子行）。
+
+    sidecar 的存在、哈希、结构已由 manifest 门禁校验过：这里只取数据。
+    """
+    path = (manifest.get("artifacts") or {}).get("sku_path")
+    if not path:
+        return {}
+    sidecar = read_json(path)
+    return sidecar.get("listings") or {}
+
+
+def fact_sources(rows, listings):
+    """把卡片行展开成入库用的 SKU 行。
+
+    多 SKU 卡片行本身没有 SKU 级字段（40 列契约装不下），入库按每个 SKU 一行：
+    sidecar 的子行才是这个 SKU 的真值。卡片行不入库——它没有 SKU 身份，
+    入库就是拿一个代表 SKU 冒充整张卡。
+
+    返回 [(行, 该 SPU 的 SKU 数, 是否多 SKU 卡, 卡片下标)]，顺序与 CSV 行一致。
+    加载器与校验器共用这一份展开：两处各判各的，校验就成了自证。
+    """
+    sources = []
+    for index, row in enumerate(rows):
+        if not is_multisku_row(row):
+            sources.append((row, 1, False, index))
+            continue
+        children = (listings or {}).get(text_value(row.get("序号"))) or []
+        if len(children) < 2:
+            raise CaptureContractError(
+                f"多SKU卡片 序号{text_value(row.get('序号'))} 的 sidecar 子行缺失"
+                "（门禁应已拦截，这里是防御）")
+        for child in children:
+            sources.append((child, len(children), True, index))
+    return sources
+
+
 def fact_fields_from_csv(source: dict, channel: str, price_column: str,
                          csv_path: str) -> dict:
     """Normalize every fact-table field derived only from one CSV row."""
@@ -560,18 +597,40 @@ def row_category_map(manifest: dict, row_count: int) -> list[tuple[str | None, s
 
 
 def coverage_allows_shortfall(coverage, expected):
-    """暂不承认任何覆盖证明：短收一律失败（2026-10-21 主线程决策）。
+    """平台标题数高于可见卡数时：只有成立的覆盖证明才放行。
 
-    旧口径是「列表解析出的卡片集合 == 采集到的卡片集合」就算读尽。集合按
-    「规格+标题」去重：同名同规格的两张卡（不同条码）会塌成一张，set 相等
-    不等于张数相等——据此放行短收，真漏抓会跟着一起被藏掉。
+    平台标题数是 App 自己的口径（它会把没渲染出来的商品也算进去）。证明成立
+    说明「App 渲染了 N 张卡、我们读到了末尾、采到的正是这 N 张」——差额是
+    App 侧多计，不是我们漏抓。证明不成立就是真漏了（或身份对不上），一律失败。
 
-    保留旧签名（coverage / expected 现已不用）以便将来用更强的卡片身份契约
-    重新启用：扫描器必须给出按条码计数的卡片身份与逐张计数（而不是 set
-    相等），且 captured 张数必须等于 CSV 行数；满足后此函数再按条件判定。
-    过渡期多失败/重采是明确的安全取舍，不改写既有数据。
+    证明由扫描器的 coverage_snapshot 给出，三条都要成立：
+      1. list_exhausted：列表读到了末尾（App 的读尽标记）；
+      2. cards_match：滚动时解析到的身份集合 == 采集行里的身份集合；
+      3. rows_have_distinct_identities：采集行里没有两行共享身份——否则同名
+         同规格的卡塌成一张，行数就不能当卡数用（旧证明的坑）。
     """
-    return False
+    if not isinstance(coverage, dict):
+        return False
+    if coverage.get("list_exhausted") is not True:
+        return False
+    if coverage.get("cards_match") is not True:
+        return False
+    if coverage.get("rows_have_distinct_identities") is not True:
+        return False
+    if coverage.get("unresolved_specs"):
+        return False
+    rendered = coverage.get("rendered_cards")
+    captured = coverage.get("captured_cards")
+    if not isinstance(rendered, int) or isinstance(rendered, bool):
+        return False
+    if not isinstance(captured, int) or isinstance(captured, bool):
+        return False
+    if rendered != captured:
+        return False
+    if not isinstance(expected, int) or isinstance(expected, bool):
+        return False
+    # 证明成立时差额是 App 侧多计；没有差额就不该走这条路。
+    return captured < expected
 
 
 def validate_segments(scope: dict, row_count: int, report: GateReport, *, require_complete: bool):

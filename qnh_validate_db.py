@@ -159,9 +159,15 @@ def _expected_by_key(rows, csv_path, snapshot, category=None, manifest=None):
     category_parts = (category.split("/", 1) + [None])[:2] if category else (None, None)
     row_categories = (C.row_category_map(manifest, len(rows)) if manifest else
                       [tuple(category_parts)] * len(rows))
+    # 多 SKU 卡片按 sidecar 展开成每个 SKU 一行：与加载器同一份展开
+    # （C.fact_sources），两处各判各的，校验就成了自证。
+    listings = C.sidecar_listings(manifest or {})
+    sources = C.fact_sources(rows, listings)
     for channel, (_, price_column) in CHANNEL_VIEW.items():
         seen = {}
-        for source, collected_at, row_category in zip(rows, times, row_categories):
+        for (source, sku_total, multi, card_index), collected_at, row_category in zip(
+                sources, [times[card_index] for *_r, _t, _m, card_index in sources],
+                [row_categories[card_index] for *_r, _t, _m, card_index in sources]):
             category_l1, category_l2 = row_category
             key = C.listing_key(
                 source["商品名称"], source.get("条码"), seen,
@@ -170,6 +176,9 @@ def _expected_by_key(rows, csv_path, snapshot, category=None, manifest=None):
                 # 携带行不入库（见 validate_snapshot 的「携带行不入库」检查）；
                 # 但仍参与定位序号计数，保持与加载器一致的 #2/#3 后缀。
                 continue
+            fields = _expected_fields(source, channel, price_column, csv_path)
+            fields["sku_count"] = sku_total
+            fields["has_multi_spec"] = 1 if multi else 0
             expected[(channel, key)] = {
                 "batch_id": snapshot["batch_id"],
                 "store_snapshot_id": snapshot["store_snapshot_id"],
@@ -186,7 +195,7 @@ def _expected_by_key(rows, csv_path, snapshot, category=None, manifest=None):
                 "category_name": category_l1,
                 "sub_category_name": category_l2,
                 "listing_key": key,
-                **_expected_fields(source, channel, price_column, csv_path),
+                **fields,
             }
     return expected
 
@@ -245,8 +254,11 @@ def validate_snapshot(conn, csv_path, snapshot_id, *, manifest_path=None):
         report.check("快照商品数", snapshot["captured_spu_count"] == len(rows),
                      f"库 {snapshot['captured_spu_count']} / CSV {len(rows)}")
         if manifest or snapshot["captured_sku_count"] is not None:
-            report.check("快照 SKU 数", snapshot["captured_sku_count"] == len(rows),
-                         f"库 {snapshot['captured_sku_count']} / CSV {len(rows)}")
+            # SKU 数按多 SKU 展开算：一张卡挂 N 个 SKU 就是 N 行。
+            expected_sku_count = len(C.fact_sources(
+                rows, C.sidecar_listings(manifest or {})))
+            report.check("快照 SKU 数", snapshot["captured_sku_count"] == expected_sku_count,
+                         f"库 {snapshot['captured_sku_count']} / CSV {expected_sku_count}")
         else:
             report.info("快照 SKU 数", "旧版快照未记录 captured_sku_count，跳过")
         expected_raw_count = (((manifest.get("scope") or {}).get(
@@ -285,7 +297,7 @@ def validate_snapshot(conn, csv_path, snapshot_id, *, manifest_path=None):
                 "store_name": profile.get("store_name"),
                 "store_role": profile.get("role"),
                 "source_store_id": str(profile.get("warehouse_id")),
-                "status": "success",
+                "status": "partial" if manifest.get("state") == C.OBSERVED_MANIFEST_STATE else "success",
                 "capture_method": "app_ui",
                 "collector_version": capture.get("collector_version"),
                 "device_id": manifest.get("device_id"),
@@ -295,9 +307,11 @@ def validate_snapshot(conn, csv_path, snapshot_id, *, manifest_path=None):
                 "category_count": category_count,
                 "expected_spu_count": scope.get("expected_product_count"),
                 "captured_spu_count": len(rows),
-                "captured_sku_count": len(rows),
+                "captured_sku_count": len(C.fact_sources(
+                    rows, C.sidecar_listings(manifest))),
                 "raw_record_count": scope.get("raw_segment_product_count", len(rows)),
-                "error_message": None,
+                # error_message 的内容由加载器拼（例外清单等），这里不比内容：
+                # 例外态另有一条检查确认它写明了例外。
                 "manifest_uri": os.path.abspath(manifest_path),
                 "manifest_sha256": C.sha256_file(manifest_path),
                 "csv_sha256": C.sha256_file(csv_path),
@@ -306,18 +320,30 @@ def validate_snapshot(conn, csv_path, snapshot_id, *, manifest_path=None):
                 f"{key}: 库={snapshot.get(key)!r} 应为={value!r}"
                 for key, value in snapshot_expected.items() if snapshot.get(key) != value
             ]
+            observed_manifest = manifest.get("state") == C.OBSERVED_MANIFEST_STATE
+            if observed_manifest:
+                # 例外态快照：状态必须是 partial，error_message 必须写明例外
+                # （不完整性写在快照上，不靠猜）。
+                if snapshot.get("status") != "partial":
+                    snapshot_mismatches.append(
+                        f"status: 库={snapshot.get('status')!r} 应为='partial'")
+                error_message = snapshot.get("error_message") or ""
+                if "观测例外" not in error_message:
+                    snapshot_mismatches.append("error_message: 没有记录观测例外")
             report.check("manifest 与快照逐字段一致", not snapshot_mismatches,
                          "；".join(snapshot_mismatches[:10]))
 
         cur.execute("SELECT * FROM fact_store_product_snapshot"
                     " WHERE store_snapshot_id = %s", (snapshot_id,))
         products = cur.fetchall()
-        expected_total = len(rows) * len(C.PRICE_CHANNELS)
+        # 事实表行数按 SKU 算：多 SKU 卡展开成每个 SKU 一行。
+        sku_rows = len(C.fact_sources(rows, C.sidecar_listings(manifest or {})))
+        expected_total = sku_rows * len(C.PRICE_CHANNELS)
         report.check("商品事实表总行数", len(products) == expected_total,
                      f"实际 {len(products)} / 应为 {expected_total}")
         counts = Counter(item["channel_code"] for item in products)
         report.check("三个渠道行数",
-                     counts == Counter({channel: len(rows) for channel, _ in C.PRICE_CHANNELS}),
+                     counts == Counter({channel: sku_rows for channel, _ in C.PRICE_CHANNELS}),
                      str(counts))
         actual = {(item["channel_code"], item["listing_key"]): item for item in products}
         report.check("事实表定位键唯一", len(actual) == len(products))

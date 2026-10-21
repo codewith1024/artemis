@@ -748,58 +748,24 @@ class CountMismatchObservationTests(ObservationCase):
                                 for error in report.errors), report.errors)
 
 
-class LoaderObservationRejectionTests(ObservationCase):
-    def test_loader_rejects_observed_manifest_before_connecting(self):
-        opened = []
+class LoaderObservationContractTests(ObservationCase):
+    """例外态产物现在可以入库（未知渠道格记 unknown，快照状态记 partial）。
 
-        def boom():
-            opened.append(True)
-            raise AssertionError("loader 不该连接数据库")
+    契约仍然把住两头：没有 v1 契约或没有逐条例外凭据的产物，进不来。
+    """
 
-        original = loader._open_connection
-        loader._open_connection = boom
-        try:
-            with tempfile.TemporaryDirectory() as directory:
-                rows = [card_row(1)]
-                _, path = self.build(
-                    directory, rows, state=C.OBSERVED_MANIFEST_STATE,
-                    observation_contract="v1",
-                    progress_extra={"observation_complete": True,
-                                    "business_complete": False,
-                                    "exceptions": []})
-                with self.assertRaises(C.CaptureContractError) as ctx:
-                    loader.load_capture(manifest_path=path)
-                self.assertIn("观测契约产物不入库", str(ctx.exception))
-        finally:
-            loader._open_connection = original
-        self.assertEqual(opened, [])
-
-    def test_loader_rejects_incomplete_business_before_connecting(self):
-        opened = []
-
-        def boom():
-            opened.append(True)
-            raise AssertionError("loader 不该连接数据库")
-
-        original = loader._open_connection
-        loader._open_connection = boom
-        try:
-            with tempfile.TemporaryDirectory() as directory:
-                rows = [card_row(1)]
-                _, path = self.build(
-                    directory, rows, state="success", observation_contract="v1",
-                    progress_extra={"business_complete": False})
-                with self.assertRaises(C.CaptureContractError) as ctx:
-                    loader.load_capture(manifest_path=path)
-                self.assertIn("business_complete", str(ctx.exception))
-        finally:
-            loader._open_connection = original
-        self.assertEqual(opened, [])
-
-    def test_legacy_manifest_is_not_blocked_by_new_rule(self):
-        """旧产物没有 v1 标记：不受新规则影响（仍走原来的严格门禁）。"""
-        legacy = {"state": "success", "capture": {}, "progress": {}}
-        self.assertIsNone(loader._reject_observed_manifest(legacy))
+    def test_observed_manifest_without_exceptions_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [card_row(1)]
+            _, path = self.build(
+                directory, rows, state=C.OBSERVED_MANIFEST_STATE,
+                observation_contract="v1",
+                progress_extra={"observation_complete": True,
+                                "business_complete": False,
+                                "exceptions": []})
+            with self.assertRaises(loader.LoadError) as ctx:
+                loader.load_capture(manifest_path=path)
+            self.assertIn("exceptions", str(ctx.exception))
 
 
 if __name__ == "__main__":
