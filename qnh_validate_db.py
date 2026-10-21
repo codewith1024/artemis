@@ -9,13 +9,25 @@ import os
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import pymysql
 
 import qnh_capture_common as C
 
 DATABASE = "retail_price_snapshot"
+
+# 校验器的期望值刻意不与加载器同源：渠道关键字段（上架状态/零售价/库存/售罄）
+# 在下面独立推导，加载器的渠道映射若回归，这里的期望不会跟着错，校验就能抓到。
+# 非渠道字段仍复用 C.fact_fields_from_csv，避免两套全实现。
+CHANNEL_VIEW = {
+    "meituan": ("美团闪购", "美团闪购价"),
+    "eleme": ("饿了么", "饿了么价"),
+    "jddj": ("京东到家", "京东到家价"),
+}
+LISTING_STATUS = {"已上架": "on_shelf", "已下架": "off_shelf", "未上线": "not_online"}
+SOLD_OUT_TOKENS = {"售罄", "已售罄"}
+CARRY_ROW_STATUS = "携带"
 
 
 @dataclass
@@ -51,8 +63,85 @@ def _parse_iso(value):
     return datetime.fromisoformat(str(value))
 
 
+def _amount(text):
+    """非负金额解析：校验器自带一份，不走加载器的解析。"""
+    value = str(text or "").strip()
+    if not value:
+        return None
+    try:
+        number = Decimal(value)
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return number if number.is_finite() and number >= 0 else None
+
+
+def _field(text):
+    value = str(text or "").strip()
+    return None if value in {"", "-"} else value
+
+
+def _channel_expectation(source, channel):
+    """独立推导一个渠道的关键字段：上架状态 / 零售价 / 库存 / 售罄。
+
+    口径与加载器同语义，但代码独立写一遍（加载器回归时这里不会跟着错）：
+      on_shelf → 渠道在售：零售价取详情零售价、缺失回退同渠道卡片价。
+      已下架 / 未上线 / 状态缺失 → 渠道不在售：只保留详情页自己的零售价与库存，
+                 不拿列表值冒充渠道详情。
+      渠道有自己的库存 → 完全按渠道库存判：0 = 售罄，>0 = 可售；列表售罄
+                 盖不掉渠道的正库存（否则「已售罄 + 正数」自相矛盾）。
+      在售渠道缺自己的库存 → 才回退列表售罄（列表售罄 → 库存 0、文案「已售罄」）。
+      渠道不在售又无渠道库存 → sale_status = unknown，不按列表赋可售。
+    """
+    if channel not in CHANNEL_VIEW:
+        raise C.CaptureContractError(f"未知渠道：{channel!r}")
+    channel_name, card_column = CHANNEL_VIEW[channel]
+    listing_status = LISTING_STATUS.get(_field(source.get(channel_name + "状态")))
+    detail_price = _amount(source.get(channel_name + "零售价"))
+    card_price = _amount(source.get(card_column))
+    detail_stock_text = str(source.get(channel_name + "库存") or "").strip()
+    list_stock_text = str(source.get("库存") or "").strip()
+    sold_out = str(source.get("售罄") or "").strip() == "是"
+    if detail_stock_text:
+        detail_stock = (Decimal(0) if detail_stock_text in SOLD_OUT_TOKENS
+                        else _amount(detail_stock_text))
+    else:
+        detail_stock = None
+    if listing_status == "on_shelf":
+        price = detail_price if detail_price is not None else card_price
+    else:
+        price = detail_price
+    if detail_stock is not None:
+        stock = detail_stock
+        sold_out = detail_stock == 0
+        sale_status = "out_of_stock" if sold_out else "available"
+        stock_text = "已售罄" if sold_out else _field(detail_stock_text)
+    elif listing_status == "on_shelf":
+        stock = Decimal(0) if sold_out else (
+            _amount(list_stock_text) if list_stock_text else None)
+        sale_status = "out_of_stock" if sold_out else (
+            "available" if str(source.get("售罄") or "").strip() in {"是", "否"}
+            else "unknown")
+        stock_text = "已售罄" if sold_out else _field(list_stock_text)
+    else:
+        stock = None
+        sale_status = "unknown"
+        stock_text = None
+    card_price_text = str(source.get(card_column) or "").strip()
+    return {
+        "front_display_price_amount": price,
+        "listing_status": listing_status,
+        "sale_status": sale_status,
+        "stock_quantity": stock,
+        "stock_text": stock_text,
+        "other_text": (_field(source.get("价格原文")) if not card_price_text else None),
+    }
+
+
 def _expected_fields(source, channel, price_column, csv_path):
-    return C.fact_fields_from_csv(source, channel, price_column, csv_path)
+    """校验器自己的期望值：渠道关键字段独立推导，其余字段复用加载器转换。"""
+    facts = dict(C.fact_fields_from_csv(source, channel, price_column, csv_path))
+    facts.update(_channel_expectation(source, channel))
+    return facts
 
 
 def _db_value(value):
@@ -70,17 +159,24 @@ def _expected_by_key(rows, csv_path, snapshot, category=None, manifest=None):
     category_parts = (category.split("/", 1) + [None])[:2] if category else (None, None)
     row_categories = (C.row_category_map(manifest, len(rows)) if manifest else
                       [tuple(category_parts)] * len(rows))
-    for channel, price_column in C.PRICE_CHANNELS:
+    for channel, (_, price_column) in CHANNEL_VIEW.items():
         seen = {}
         for source, collected_at, row_category in zip(rows, times, row_categories):
             category_l1, category_l2 = row_category
             key = C.listing_key(
                 source["商品名称"], source.get("条码"), seen,
                 source.get("SKU"), source.get("SPU"))
+            if C.text_value(source.get("状态")) == CARRY_ROW_STATUS:
+                # 携带行不入库（见 validate_snapshot 的「携带行不入库」检查）；
+                # 但仍参与定位序号计数，保持与加载器一致的 #2/#3 后缀。
+                continue
             expected[(channel, key)] = {
                 "batch_id": snapshot["batch_id"],
                 "store_snapshot_id": snapshot["store_snapshot_id"],
-                "snapshot_hour": snapshot["snapshot_hour"],
+                # 每行事实的 snapshot_hour 取该行采集时间所在小时；快照自身的
+                # hour 保持批次开始时刻，不套到全部事实行。
+                "snapshot_hour": (collected_at.replace(minute=0, second=0, microsecond=0)
+                                  if collected_at else snapshot["snapshot_hour"]),
                 "collected_at": collected_at,
                 "capture_method": "app_ui",
                 "channel_code": channel,
@@ -105,6 +201,13 @@ def validate_snapshot(conn, csv_path, snapshot_id, *, manifest_path=None):
         report.failures.append(("CSV", str(exc)))
         return report
     manifest = C.read_json(manifest_path) if manifest_path else None
+
+    carry_rows = [index for index, row in enumerate(rows, 1)
+                  if C.text_value(row.get("状态")) == CARRY_ROW_STATUS]
+    if carry_rows:
+        report.check("携带行不入库", False,
+                     "第" + "、".join(str(index) for index in carry_rows[:10])
+                     + "行状态=携带：渠道详情是历史合成值，须重新实访详情页")
 
     cur = conn.cursor(pymysql.cursors.DictCursor)
     snapshots = []
@@ -222,6 +325,10 @@ def validate_snapshot(conn, csv_path, snapshot_id, *, manifest_path=None):
                     else (snapshot.get("covered_categories") or "").replace(" > ", "/") or None)
         expected = _expected_by_key(rows, csv_path, snapshot, category=category,
                                     manifest=manifest)
+        report.check("校验器渠道表与加载器一致",
+                     set(CHANNEL_VIEW) == {code for code, _ in C.PRICE_CHANNELS},
+                     f"校验器={sorted(CHANNEL_VIEW)} "
+                     f"加载器={sorted(code for code, _ in C.PRICE_CHANNELS)}")
         report.check("CSV 定位键唯一", len(expected) == expected_total)
         report.check("CSV/DB 定位键集合一致", set(expected) == set(actual),
                      f"missing={len(set(expected)-set(actual))} extra={len(set(actual)-set(expected))}")
@@ -329,6 +436,9 @@ def validate_snapshot(conn, csv_path, snapshot_id, *, manifest_path=None):
                     (item["spu"], item["sku"]))
         unique_master = {upc: next(iter(values)) for upc, values in master_values.items()
                          if len(values) == 1}
+        # map 一行一个 listing（uk_map_listing），不按源 SKU 唯一：同 SKU 同名多规格
+        # 合法，同一个 SKU 会对应多个 listing_key。平台源 SKU 不写进 map
+        # （uk_map_source_sku 与多规格互斥），事实表已按行留存 source_sku_id。
         expected_maps = {}
         for channel, _ in C.PRICE_CHANNELS:
             seen = {}

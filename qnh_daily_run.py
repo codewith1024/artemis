@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""每日增量采集编排：基线导出 → 携带分片采集 → 聚合 → auto-commit。
+"""每日采集编排：实访详情分片采集 → 聚合 → auto-commit。
 
 供 Claude Code 定时任务（00:05）调用；全程幂等可续跑：
   * 前置检查设备在线（Wi-Fi ADB），失败写状态文件退出，由巡检会话处理；
@@ -136,7 +136,7 @@ def main():
     parser.add_argument("--date", default=datetime.now().strftime("%Y%m%d"),
                         help="运行日期（默认今天）；out-dir 与状态文件按日期命名")
     parser.add_argument("--skip-baseline", action="store_true",
-                        help="跳过基线导出（复用既有 carry_baseline.json，调试用）")
+                        help="兼容旧命令；历史详情携带已停用，不再导出基线")
     parser.add_argument("--no-commit", action="store_true",
                         help="聚合后 dry-run 回滚，不提交（调试用）")
     parser.add_argument("--no-dismiss-dialogs", action="store_true",
@@ -145,7 +145,6 @@ def main():
     out_dir = os.path.join(ROOT, "qnh_daily", args.date)
     os.makedirs(out_dir, exist_ok=True)
     log_path = os.path.join(out_dir, "daily.log")
-    baseline_path = os.path.join(ROOT, "qnh_daily", "carry_baseline.json")
     completed = committed_result(out_dir)
     if completed:
         result_path, result = completed
@@ -174,21 +173,11 @@ def main():
             log_fh.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
             log_fh.flush()
 
-        if not args.skip_baseline:
-            stamp("导出携带基线")
-            code = run([sys.executable, os.path.join(ROOT, "qnh_daily_baseline.py"),
-                        "--out-dir", os.path.join(ROOT, "qnh_daily")], log_fh)
-            if code != 0:
-                write_status(out_dir, state=FAILED, stage="baseline",
-                             error=f"基线导出退出码 {code}；日志 {log_path}")
-                raise SystemExit(2)
-
-        stamp("分片采集（携带基线 + 断点续跑）")
+        stamp("分片采集（逐商品实访详情 + 断点续跑；历史详情携带已停用）")
         write_status(out_dir, state="running", stage="capture",
                      runner_pid=os.getpid(), child_pids=[])
         code = run([sys.executable, os.path.join(ROOT, "qnh_category_pipeline.py"),
                     "--out-dir", out_dir,
-                    "--carry-baseline", baseline_path,
                     *([] if args.no_commit else ["--commit"]),
                     *([] if args.no_dismiss_dialogs else ["--dismiss-order-dialogs"])],
                    log_fh,

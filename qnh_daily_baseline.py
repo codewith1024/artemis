@@ -2,15 +2,23 @@
 """Export the daily carry baseline (携带基线) from the latest committed snapshot.
 
 供 qnh_product_scan.py --carry-baseline 在每日增量采集中跳过指纹一致的
-商品详情页。detail 列从 DB 反向映射回 CSV 文本；映射正确性由
+商品详情页（当前扫描侧已停用该入口、不读本文件；导出仅供离线审计）。
+detail 列从 DB 反向映射回 CSV 文本；映射正确性由
 fact_fields_from_csv 的 round-trip 抽样自检保证。
 
-已知事实（2026-10-15 核实）：fact_fields_from_csv 以英文渠道键拼中文列名
-（"meituan零售价"），渠道详情列从未被读入 DB——全库 listing_status NULL、
-价格/库存均走卡片回退。因此：
-  * 渠道状态列还原为按 sale_status 推导的合法枚举（入库后仍为 NULL，
-    round-trip 天然一致）；
-  * 价格/库存按卡片口径还原（这正是 DB 里存值的口径）。
+legacy 快照的已知事实（2026-10-15 核实）：fact_fields_from_csv 以英文渠道键拼
+中文列名（"meituan零售价"），那一批入库的渠道详情列从未进 DB——那批快照
+listing_status 为 NULL、价格/库存是卡片口径的值。当前口径（不再假设全库
+如此）：
+  * 渠道状态列只还原 DB 里真实的 listing_status（on_shelf/off_shelf/not_online）；
+    NULL/未知一律留空，绝不按 sale_status 伪造"已上架"——伪造的渠道状态会把
+    未核实的商品带进基线，这类渠道的商品整行不携带；
+  * 价格/库存直接还原 DB 里存的值（front_display_price_amount /
+    stock_quantity），不再由 sale_status 决定给不给值。
+
+schema_version 2（2026-10-21）：补 generation_source/carry_enabled 说明，
+商品级补 store_inner_code/article_no（CSV 店内码/货号），SKU 跨名称/SPU
+冲突整组剔除。日龄门限暂不实现——携带已停用，加一个不生效的门限只是摆设。
 """
 
 from __future__ import annotations
@@ -30,6 +38,8 @@ DATABASE = "retail_price_snapshot"
 
 YES_NO = {1: "是", 0: "否"}
 STD_FLAG = {1: "标品", 0: "非标品"}
+# DB listing_status 枚举 → CSV 中文状态列（LISTING_STATUS_MAP 的反向）。
+LISTING_STATUS_TEXT = {value: text for text, value in C.LISTING_STATUS_MAP.items()}
 
 
 def _db_open():
@@ -49,25 +59,38 @@ def _amount_txt(value):
     return "" if value is None else format(Decimal(value).normalize(), "f")
 
 
+def _channel_status(fact):
+    """DB 的 listing_status → CSV 中文状态文本；未知/NULL → ""（不伪造）。
+
+    只有真实枚举（on_shelf/off_shelf/not_online）才算已知。NULL（legacy 快照
+    里常见，那批渠道详情从未入库）说明这条渠道没有可信的上架状态，sale_status
+    只是卡片售罄口径，推不出上架状态。
+    """
+    raw = fact.get("listing_status")
+    return LISTING_STATUS_TEXT.get(raw, "") if isinstance(raw, str) else ""
+
+
 def _channel_columns(fact):
     """一个渠道 fact 行 → (状态, 零售价, 库存) 三列文本。
 
-    状态按 sale_status 推导：DB 无 listing_status（见模块 docstring）。
-    零售价/库存按卡片口径还原（DB 存的就是卡片口径值）。
+    状态只认 DB 里真实的 listing_status（见 _channel_status）；NULL/未知留空，
+    这种渠道的商品整行不携带（fetch_baseline）。旧版按 sale_status 推导
+    "已上架"是伪造——listing_status 为 NULL 时会把未核实的渠道状态写进基线。
+    零售价/库存直接还原 DB 里存的值：DB 存什么就还原什么，不由 sale_status
+    空造或截断（凭空清空会把本来可逆的行判成不可逆，白丢可携带商品）。
+    售罄标记由卡片口径的 售罄 列承担（row_from_fact 写入）。
     """
-    sale = fact.get("sale_status")
-    if sale == "out_of_stock":
-        return "已上架", _amount_txt(fact.get("front_display_price_amount")), "售罄"
-    if sale == "available":
-        return "已上架", _amount_txt(fact.get("front_display_price_amount")), \
-            _amount_txt(fact.get("stock_quantity"))
-    return "未上线", "", ""
+    return (_channel_status(fact),
+            _amount_txt(fact.get("front_display_price_amount")),
+            _amount_txt(fact.get("stock_quantity")))
 
 
 def row_from_fact(meituan, eleme, jddj):
     """三个渠道的 fact 行（同一商品）→ 一行 40 列 CSV dict（不含序号/时间/证据）。
 
     还原规则以「fact_fields_from_csv 再解析后与 DB 一致」为准：
+      * 渠道状态列只还原 DB 里真实的 listing_status，未知留空（见
+        _channel_columns）；未知渠道的商品整行不携带；
       * other_text 非空 = 卡片价格区不是标准 4 行 → split=False 形态：
         三渠道卡价列与采购价列全空，价格原文 = other_text；
       * 采购价_详情 优先 purchase_price_text 原文（金额列 decimal(18,4)
@@ -182,6 +205,33 @@ def _roundtrip_errors(row, meituan, eleme, jddj):
     return errors
 
 
+def _sku_conflicts(meituan_rows):
+    """返回有身份冲突的 SKU 集合。
+
+    口径直接用采集侧同一道门禁 C.validate_product_identities：同一非空 SKU
+    指向不同商品名/SPU 即冲突（历史上出现过 86 组这类冲突）；同 SPU 多 SKU、
+    同名多规格合法。组在全部美团行上统计——缺渠道行、身份重叠的成员同样
+    会污染同 SKU 的其他成员。
+    """
+    groups = {}
+    for fact in meituan_rows:
+        sku = C.text_value(fact.get("source_sku_id"))
+        if not sku:
+            continue
+        groups.setdefault(sku, []).append({
+            "SKU": sku,
+            "SPU": _txt(fact.get("source_spu_id")),
+            "商品名称": _txt(fact.get("product_name")),
+        })
+    conflicts = set()
+    for sku, group in groups.items():
+        report = C.GateReport()
+        C.validate_product_identities(group, report)
+        if not report.ok:
+            conflicts.add(sku)
+    return conflicts
+
+
 def fetch_baseline(conn, store_code):
     """最近 success 快照 → (snapshot_id, products, 组装行缓存)。"""
     cur = conn.cursor()
@@ -206,8 +256,13 @@ def fetch_baseline(conn, store_code):
     rebuilt = []   # (row, meituan, eleme, jddj) 供自检
     missing_channel = 0
     lossy = 0
+    unknown_status = 0
+    sku_conflict = 0
     candidates = []
     listing_counts = {}
+    # 同一非空 SKU 映射到不同商品名/SPU → 整组不携带：携带会把别的商品的
+    # 详情挂到今天的卡片上。
+    conflict_skus = _sku_conflicts(meituan_rows)
     for meituan in meituan_rows:
         eleme = others.get(("eleme", meituan["listing_key"]))
         jddj = others.get(("jddj", meituan["listing_key"]))
@@ -227,6 +282,14 @@ def fetch_baseline(conn, store_code):
     for listing, row, meituan, eleme, jddj in candidates:
         if listing_counts[listing] > 1:
             continue
+        if C.text_value(meituan.get("source_sku_id")) in conflict_skus:
+            sku_conflict += 1
+            continue
+        # 渠道上架状态未知（DB listing_status 为 NULL/非枚举）→ 整行不携带：
+        # 伪造的"已上架"比空状态更危险。
+        if not all(_channel_status(fact) for fact in (meituan, eleme, jddj)):
+            unknown_status += 1
+            continue
         if _roundtrip_errors(row, meituan, eleme, jddj):
             # DB 装不下原文精度（6 位小数采购价被 decimal(18,4) 截断）或
             # 渠道间残缺形态不可逆：这些商品不携带，每天走完整详情页。
@@ -238,6 +301,9 @@ def fetch_baseline(conn, store_code):
             "detail": [row[column] for column in C.DETAIL_COLUMNS],
             "barcode": row["条码"],
             "name": row["商品名称"],
+            # 店内码/货号只在详情页出现，列表卡看不到；携带行靠基线补齐这两列。
+            "store_inner_code": row["店内码"],
+            "article_no": row["货号"],
         }
         rebuilt.append((row, meituan, eleme, jddj))
     if missing_channel:
@@ -245,6 +311,12 @@ def fetch_baseline(conn, store_code):
     if ambiguous_rows:
         print(f"警告：{ambiguous_rows} 个商品列表身份重叠，整组不携带、每日走详情页",
               flush=True)
+    if sku_conflict:
+        print(f"警告：{sku_conflict} 个商品（{len(conflict_skus)} 组 SKU）跨名称/SPU 冲突，"
+              "整组不携带、每日走详情页", flush=True)
+    if unknown_status:
+        print(f"警告：{unknown_status} 个商品渠道上架状态未知（DB listing_status 非真实枚举），"
+              "整行不携带、每日走详情页", flush=True)
     if lossy:
         print(f"警告：{lossy} 个商品 DB 值不可逆（精度/形态边界），不携带、每日走详情页",
               flush=True)
@@ -286,9 +358,16 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, "carry_baseline.json")
     C.atomic_write_json(out_path, {
-        "schema_version": 1,
+        "schema_version": 2,
         "baseline_snapshot_id": snapshot_id,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generation_source": "retail_price_snapshot.fact_store_product_snapshot",
+        # 历史详情复用已停用：扫描侧直接拒绝携带、不读本文件。这里导出的
+        # products 仅供离线审计/排查，不参与每日增量采集。
+        "carry_enabled": False,
+        "carry_note": "扫描侧拒绝历史携带（不读本文件），products 仅供离线审计；"
+                      "渠道上架状态未知（DB listing_status 非真实枚举）的商品整行不携带；"
+                      "SKU 跨名称/SPU 冲突整组不携带。",
         "products": products,
     })
     print(f"携带基线已导出：{out_path}（{len(products)} 商品）")

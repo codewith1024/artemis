@@ -1,0 +1,18 @@
+{
+  "captured_at": "2026-10-21",
+  "full_store_count": 28,
+  "segments": [
+    {
+      "expected_count": 9,
+      "leaf": "花卉绿植",
+      "order": 1,
+      "top": "家居日用"
+    },
+    {
+      "expected_count": 19,
+      "leaf": "白酒烧酒",
+      "order": 2,
+      "top": "酒水乳饮"
+    }
+  ]
+}

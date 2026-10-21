@@ -20,7 +20,7 @@ def complete_row(index=1, name="商品A", barcode="6900000000001", prefix=""):
         "售罄": "否", "活动品": "否",
         "美团闪购价": "10", "饿了么价": "10", "京东到家价": "10",
         "采购价": "5/袋", "价格原文": "10 | 10 | 10 | 5/袋",
-        "开放平台标识": "SPU-1", "SPU": "SPU-1", "SKU": "SKU-1",
+        "开放平台标识": "SPU-1", "SPU": "SPU-1", "SKU": "SKU-" + barcode,
         "重量": "100克(g)", "采购价_详情": "5", "采购单位_详情": "袋",
         "美团闪购状态": "已上架", "美团闪购零售价": "10", "美团闪购库存": "2",
         "饿了么状态": "未上线",
@@ -73,6 +73,12 @@ class ManifestGateTests(unittest.TestCase):
                 "requested_count": 0,
                 "raw_segment_product_count": 3,
                 "cross_category_duplicate_count": 1,
+                "coverage_mode": C.FULL_STORE_COVERAGE_MODE,
+                "realtime_full_store_count": 2,
+                "realtime_count_difference": 0,
+                "full_store_coverage": {
+                    "status": "verified", "category_inventory_verified": False,
+                },
                 "segments": [
                     {"order": 1, "top": "休闲零食", "leaf": "薯片薯条",
                      "expected_count": 2, "captured_count": 2, "unique_count": 2,
@@ -194,6 +200,7 @@ class ManifestGateTests(unittest.TestCase):
 
     def test_on_shelf_channel_uses_card_price_and_stock_when_detail_row_missing(self):
         row = complete_row()
+        row["饿了么状态"] = "已上架"
         row["饿了么零售价"] = ""
         row["饿了么库存"] = ""
         row["饿了么价"] = "5.50"

@@ -50,8 +50,12 @@ python3（标准库即可，无第三方包）、adb、scrcpy（录制时才需�
 默认每 50 个商品原子保存一次断点，`--resume 上一轮.csv` 可续跑。
 """
 
+import qnh_sku_capture as SKU_CAPTURE
+import qnh_observation as OBS
+
 import argparse
 import atexit
+from contextlib import contextmanager
 import csv
 import hashlib
 import json
@@ -128,7 +132,7 @@ LAZY_LOAD_RETRIES = 3
 # 会落到上一行的元信息上（实测出现过把「月售：0」当成商品点进去）。
 META_PAT = re.compile(
     r"^\s*(月售|月销|已售罄|售罄|活动品|改价|查看|无数据|"
-    r"采购|渠道|零售价|库存|规格|条码|￥|¥)")
+    r"采购|渠道|零售价|库存|规格(?:[:：]|$)|条码|￥|¥)")
 
 # 商品标题节点宽度下限（占屏宽的比例）。实测真标题 597/1080 ≈ 0.55，
 # 「查看(2)」「月售：0」这类内联元素远低于此。
@@ -142,6 +146,11 @@ CARD_COL_SLACK = 60
 # 而详情页渠道价格表的表头是裸的「规格」——不带冒号会把详情页也认成列表页。
 SPEC_PAT = re.compile(r"^规格[:：]")
 BARCODE_PAT = re.compile(r"^条码")
+
+# 列表读完时应用在底部给出的标记。它出现在层级里时，说明平台已经把这一页
+# 的全部卡片渲染出来了——可以据此证明「平台标题计数高于列表卡片数」是平台
+# 自己的口径差，而不是我们漏抓。
+LIST_END_MARKER = "已加载全部数据"
 
 # 列表卡片上的价格区：每行一个渠道图标 + 被拆成几段的价格（「￥」「45」「.00」
 # 「/份」），图标是图片，层级里没有任何文字或描述，只能按顺序认渠道。实测顺序
@@ -178,6 +187,10 @@ WEIGHT_PAT = re.compile(
 DETAIL_PRICE_PAT = re.compile(r"^[￥¥](\d+(?:\.\d+)?)$")
 CHANNEL_ROW_PAT = re.compile(r"^(美团闪购|饿了么|京东到家)$")
 LISTING_STATUS_PAT = re.compile(r"^(已上架|已下架|未上线)\((.+)\)$")
+# 一个 SPU 有多个 SKU 时，采购表和渠道表都是「每个 SKU 一行」：规格取第一行、
+# SKU/条码取最后一行、渠道价取最后一行会拼成一条假的完整行。一行契约装不下，
+# 明确报错，不挑第一个冒充完整。
+MULTISPEC_ERROR = "多规格详情无法映射到单行契约"
 DETAIL_LABEL_PATS = (
     (re.compile(r"^卖点[:：]\s*(\S.*)$"), "卖点"),
     (re.compile(r"^可售日期[:：]\s*(\S.*)$"), "可售日期"),
@@ -246,11 +259,23 @@ class Ctx:
     row_product_ids = {}  # CSV 序号 → (条码, 标题, 规格)，隔离重复条码变体
     resume_missing_bindings = {}  # (条码,标题) → 已绑定的当前 UI 精确身份
     details = {}        # 稳定行身份 → 详情页字段（verify 时解析）
+    sku_rows = {}       # 卡片序号 → 全部 SKU 的独立字段；不写代表 SKU 到卡级 CSV
+    observe_exceptions = False
+    list_evidence = None
+    observation_exceptions = []
     resumed_details = {}  # 续跑：稳定行身份 → 上一轮 CSV 里的详情列
     carry_details = {}  # 每日增量：指纹一致的行 → 基线详情列（文本原样沿用）
     carry_baseline = None   # --carry-baseline 载入的基线（listing 定位串 → 条目）
     carry_seen = None       # 携带命中的 listing 定位串集合（结束时报未命中数）
     carry_card_deferrals = {}  # 列表卡被屏幕下沿截断时延后一屏再比较（每身份至多一次）
+    timings = {}
+    traversal_counts = {}
+    metrics_started = None
+    detail_attempts = 0
+    carried_this_run = 0
+    parsed_cards = set()    # 列表里解析成功的卡片：(规格, 标题)
+    orphan_specs = set()    # 见过规格却没配到标题的卡片（规格文本）
+    list_end_marker = False # 应用是否给出「已加载全部数据」
     last_detail_nodes = []  # open_detail 最后一次确认过的详情页节点，避免调用方重复 dump
     last_detail_fingerprint = None
     display_backup = None   # --tall-screen 前的 (size_override, density_override, effective_density)
@@ -549,6 +574,15 @@ def parse_nodes(xml):
         root = ET.fromstring(xml)
     except ET.ParseError as e:
         die(f"UI XML 解析失败: {e}")
+    detail_titles = set()
+    if any(el.get("text") == DETAIL_TITLE for el in root.iter("node")):
+        for group in root.iter("node"):
+            children = list(group)
+            for index, child in enumerate(children):
+                if OPEN_PLATFORM_PAT.match(child.get("text") or "") and index:
+                    candidate = children[index - 1]
+                    if candidate.get("text") and not list(candidate):
+                        detail_titles.add(id(candidate))
     nodes = []
     for el in root.iter("node"):
         b = el.get("bounds", "")
@@ -562,6 +596,7 @@ def parse_nodes(xml):
             "cls": el.get("class") or "",
             "pkg": el.get("package") or "",
             "clickable": el.get("clickable") == "true",
+            "detail_title": id(el) in detail_titles,
             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
             "cx": (x1 + x2) // 2, "cy": (y1 + y2) // 2,
             "w": x2 - x1, "h": y2 - y1,
@@ -705,6 +740,12 @@ def dump_nodes_undisturbed(where):
     return nodes
 
 
+def note_list_end_marker(nodes):
+    """记录应用是否给出「已加载全部数据」——列表确实读完了的标记。"""
+    if any((node.get("text") or "").strip() == LIST_END_MARKER for node in nodes):
+        CTX.list_end_marker = True
+
+
 def find_products(nodes, exclude_texts):
     """
     用「规格：」做锚点定位商品行。
@@ -716,6 +757,11 @@ def find_products(nodes, exclude_texts):
     # 坐标点到详情页上。
     if is_detail_page(nodes):
         return []
+    # 只有停在目标类目的列表里才统计卡片：切换类目和「重置到顶部」都会经过
+    # 「全部商品」列表，那里的卡片不属于本次分片，算进去会毁掉覆盖证明。
+    on_target = category_selection_valid(CTX.category, nodes)
+    if on_target:
+        note_list_end_marker(nodes)
     texts = [n for n in nodes
              if n["text"] and n["text"] not in exclude_texts]
     specs = [n for n in texts if SPEC_PAT.match(n["text"])]
@@ -729,6 +775,7 @@ def find_products(nodes, exclude_texts):
 
     products = []
     for sp in specs:
+        spec_text = C.normalize_name(SPEC_PAT.sub("", sp["text"]).strip())
         # 标题：左边缘与规格对齐（允许几像素误差）、在规格上方、且离得最近
         cands = [n for n in texts
                  if abs(n["x1"] - sp["x1"]) <= 6
@@ -739,8 +786,14 @@ def find_products(nodes, exclude_texts):
                  and not BARCODE_PAT.match(n["text"])
                  and not META_PAT.match(n["text"])]
         if not cands:
+            # 这张卡片渲染出来了，却配不到标题（标题被当成元信息过滤，或
+            # 卡片还没渲染完）。记下来：覆盖证明要求它后来能被正常解析。
+            if on_target:
+                CTX.orphan_specs.add(spec_text)
             continue
         title = max(cands, key=lambda n: n["y2"])
+        if on_target:
+            CTX.parsed_cards.add((spec_text, C.normalize_name(title["text"])))
 
         # 条码：规格下方最近的条码节点
         bcs = [n for n in texts
@@ -837,6 +890,26 @@ def card_cols(title, barcode, index=None, spec=None):
             " | ".join(p)]
 
 
+def detail_spec_names(nodes):
+    """
+    详情页渠道表第一列的规格名（每个 SKU 一行，按出现顺序去重）。
+
+    真机 2026-10-21（tests/fixtures/qnh_multispec_detail.xml）：渠道表是
+    「规格 | 渠道 | 零售价 | 渠道库存」，规格列在最左，渠道名右边同一视觉行。
+    """
+    texts = [n for n in nodes if n["text"]]
+    names = []
+    for cn in (n for n in texts if CHANNEL_ROW_PAT.match(n["text"])):
+        row = [t for t in texts
+               if t is not cn and abs(t["cy"] - cn["cy"]) <= 25]
+        spec = min((t for t in row if t["x1"] < cn["x1"]),
+                   key=lambda t: t["x1"], default=None)
+        name = spec["text"] if spec else ""
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def parse_detail(nodes, detail=None):
     """
     把详情页当前可见的字段解析出来，合并进 detail（后到的覆盖先到的）。
@@ -846,6 +919,19 @@ def parse_detail(nodes, detail=None):
     """
     detail = {} if detail is None else detail
     texts = [n for n in nodes if n["text"] and "kaixin" not in n["text"]]
+    # 一个 SPU 多个 SKU：采购表和渠道表都按 SKU 分行，一行契约装不下。
+    # 规格取第一行、SKU/条码取最后一行、渠道价取最后一行会拼成一条假的完整行，
+    # 明确报错停住，不挑第一个冒充完整。
+    skus = []
+    for n in texts:
+        m = SKU_PAT.match(n["text"])
+        if m and m.group(1) not in skus:
+            skus.append(m.group(1))
+    if len(skus) > 1 and is_detail_page(nodes):
+        specs = detail_spec_names(nodes)
+        raise C.CaptureContractError(
+            f"{MULTISPEC_ERROR}：{len(skus)}个SKU，规格「{'、'.join(specs)}」，"
+            f"SKU {'、'.join(skus)}")
     # 渠道信息区块的位置：采购价表格的值都在它上方
     section_y = next((n["y1"] for n in texts if n["text"] == "渠道信息"), None)
     # 「其他信息」区块：标签在左（如「礼袋绑定」），值是右侧同行节点
@@ -878,6 +964,8 @@ def parse_detail(nodes, detail=None):
                     and header["y2"] - 2 <= n["y1"]
                     and (section_y is None or n["y2"] < section_y)]
         left_col.sort(key=lambda n: n["y1"])
+        if left_col:
+            detail["规格_身份"] = left_col[0]["text"]
         if "重量" not in detail:
             for n in left_col:
                 if WEIGHT_PAT.match(n["text"]):
@@ -902,10 +990,12 @@ def parse_detail(nodes, detail=None):
     if "采购价_详情" not in detail:
         prices = sorted((n for n in texts if DETAIL_PRICE_PAT.match(n["text"])),
                         key=lambda n: n["y1"])
-        if prices:
-            above = [n for n in prices if section_y is None or n["y2"] < section_y]
-            p = above[0] if above else prices[0]
-            detail["采购价_详情"] = DETAIL_PRICE_PAT.match(p["text"]).group(1)
+        if section_y is not None:
+            above = [n for n in prices if n["y2"] < section_y]
+            if above:
+                detail["采购价_详情"] = DETAIL_PRICE_PAT.match(above[0]["text"]).group(1)
+            elif any(n["text"] == "无数据" and n["y2"] < section_y for n in texts):
+                detail["采购价_详情"] = "无数据"
     # 渠道表格：渠道名所在行里，右边依次是 ¥零售价、库存（售罄时是「售罄」）
     for cn in (n for n in texts if CHANNEL_ROW_PAT.match(n["text"])):
         row = [n for n in texts
@@ -1448,7 +1538,7 @@ def video_offset():
 
 CSV_COLUMNS_LEGACY = C.BASE_COLUMNS
 CSV_COLUMNS = C.BASE_COLUMNS + C.META_COLUMNS
-RESUME_DONE = {"成功", "自建商品", "携带"}   # 续跑时视为已完成、不再点开的状态
+RESUME_DONE = {"成功", "自建商品", "多SKU"}   # 多 SKU 必须先校验完整 sidecar 才可续跑
 
 # 携带基线（每日增量）：状态名与行构造。携带行不点详情页，卡片列来自
 # 本次滚动读到的卡片，详情列沿用基线快照。
@@ -1456,60 +1546,17 @@ CARRY_STATUS = "携带"
 
 
 def load_carry_baseline(path):
-    """载入每日增量携带基线：{listing 定位串 → {fingerprint, detail}}。
-
-    fingerprint 为一级触发字段（三渠道价/采购价/售罄/规格/活动品）的
-    归一化键，与 compare_card_baseline 的输出可直接 == 比较。
-    """
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
-    if not isinstance(data, dict) or data.get("schema_version") != 1:
-        raise C.CaptureContractError(f"携带基线格式不支持：{path}")
-    CTX.carry_baseline = data["products"]
-    CTX.carry_seen = set()
-    info(f"携带基线：{len(CTX.carry_baseline)} 个商品（{os.path.basename(path)}）")
+    raise C.CaptureContractError(
+        "历史详情携带已停用：基线没有当日渠道详情证据，请移除 --carry-baseline 后实访采集")
 
 
 def compare_card_baseline(card, baseline_entry):
-    """今日卡片 vs 基线：价格/规格/活动品一致时携带详情列。
-
-    月售、库存及售罄状态均来自今日列表卡，变化不需要打开详情页；详情专属
-    的分渠道库存/上架状态沿用基线，并由周期全量刷新。价格、规格和活动品
-    仍严格触发详情。
-    """
-    p = card["prices"]
-    split = len(p) == CARD_PRICE_ROWS
-    today = {
-        "spec": C.normalize_name(card["spec"]),
-        "sold_out": bool(card["sold_out"]),
-        "promo_item": bool(card["promo_item"]),
-        "prices": [C.carry_price_key(p[i]) if split and i < len(p) else None
-                   for i in range(4)],
-    }
-    # None in the baseline marks a deliberately unknown historical component (for
-    # example combo purchase prices parsed from a channel retail row). Unknown never
-    # triggers; every concrete baseline value remains strict.
-    baseline = baseline_entry["fingerprint"]
-    for field in ("spec", "promo_item"):
-        if today[field] != baseline[field]:
-            return None
-    for current, previous in zip(today["prices"], baseline["prices"]):
-        if previous is not None and current != previous:
-            return None
-    return baseline_entry["detail"]
+    # ponytail: 历史渠道值没有新鲜度证明；有逐字段来源时间后再恢复携带。
+    return None
 
 
 def _carry_row(idx, prod, detail_values):
-    """构造携带行：列表读卡今日值 + 基线详情列，不点开详情页。
-
-    卡片列不需要单独存：compare 命中时该卡的完整字段刚由 find_products
-    写入 CTX.cards，card_cols() 会输出与其他行一致的今日值。
-    """
-    info(f"[{idx:>3}] ≡ {prod['title'][:36]}  指纹一致，携带基线")
-    CTX.rows.append([idx, prod["title"], prod["barcode"], "", "",
-                     CARRY_STATUS, video_offset(), *capture_meta()])
-    remember_row_product(idx, prod)
-    CTX.carry_details[C.row_identity(idx, prod["title"], prod["barcode"])] = detail_values
+    raise C.CaptureContractError("历史详情携带已停用，不能构造携带行")
 
 
 def capture_meta(now=None):
@@ -1580,14 +1627,15 @@ def load_resume(path, *, strict_manifest=False):
         if suppressed:
             info(f"续跑：剔除了 {suppressed} 条跨 run 重复追加记录")
 
-        # 无条码旧记录无法区分同名重叠卡，沿用旧策略保留信息最全的一条。
+        # 无条码同名不同规格是独立商品，不能在续跑时按名称吞掉。
         by_name = {}
         output = []
         for row in kept:
             if C.text_value(row.get("条码")):
                 output.append(row)
                 continue
-            key = C.listing_identity(row.get("商品名称"), "")
+            key = (C.normalize_name(row.get("商品名称")),
+                   C.normalize_name(row.get("规格")))
             previous = by_name.get(key)
             if previous is None:
                 by_name[key] = row
@@ -1617,6 +1665,24 @@ def load_resume(path, *, strict_manifest=False):
             info(f"续跑：清理了上一轮 {len(kept) - len(best)} 条旧版重复记录")
         kept = best
     CTX.resumed = len(kept)
+    CTX.sku_rows = {}
+    if any(row.get("状态") == "多SKU" for row in kept):
+        if not strict_manifest:
+            die("多 SKU 续跑必须提供带 sidecar 哈希的父 manifest")
+        parent_path = C.source_prefix(path) + ".manifest.json"
+        parent = C.read_json(parent_path)
+        source = (parent.get("artifacts") or {}).get("sku_path")
+        source = (source if os.path.isabs(source) else os.path.join(
+            os.path.dirname(parent_path), source))
+        sidecar = C.read_json(source)
+        children = sidecar["listings"]
+        for i, row in enumerate(kept, 1):
+            if row.get("状态") == "多SKU":
+                CTX.sku_rows[i] = children[str(row["序号"])]
+                metadata = sidecar.get("observations", {}).get(str(row["序号"]), {})
+                for child in CTX.sku_rows[i]:
+                    if str(child.get("SKU")) in metadata:
+                        child["_channel_observations"] = metadata[str(child["SKU"])]
     CTX.resume_missing_bindings = {}
     # 清理后序号会有空洞，而新行按"已有行数 + 1"编号，所以统一重新编号
     CTX.rows = [[i, r["商品名称"], r["条码"], r["店内码"],
@@ -1654,7 +1720,7 @@ def scanner_version():
                              capture_output=True, text=True, timeout=5).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         rev = ""
-    files = [os.path.join(MODULE_DIR, "qnh_product_scan.py"), C.__file__]
+    files = [os.path.join(MODULE_DIR, "qnh_product_scan.py"), C.__file__, SKU_CAPTURE.__file__, OBS.__file__]
     if CTX.profiles_file:
         files.append(CTX.profiles_file)
     digest = hashlib.sha256()
@@ -1664,6 +1730,103 @@ def scanner_version():
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 digest.update(chunk)
     return "qnh-capture-contract" + (f"@{rev}" if rev else "") + f"+{digest.hexdigest()[:16]}"
+
+
+@contextmanager
+def measured(stage):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        CTX.timings[stage] = CTX.timings.get(stage, 0.0) + time.monotonic() - started
+
+
+def scan_metrics():
+    elapsed = time.monotonic() - CTX.metrics_started if CTX.metrics_started else 0.0
+    return {"seconds": {**{key: round(value, 3) for key, value in CTX.timings.items()},
+                        "other": round(max(0.0, elapsed - sum(CTX.timings.values())), 3),
+                        "total": round(elapsed, 3)},
+            "counts": {**CTX.traversal_counts, "detail_attempts": CTX.detail_attempts,
+                       "carried_rows": CTX.carried_this_run,
+                       "resumed_rows": CTX.resumed,
+                       "new_rows": max(0, len(CTX.rows) - CTX.resumed)}}
+
+
+def observe_list_or_die(category):
+    """列表观测：失败就按失败收口，绝不让异常甩出 main()。
+
+    异常甩出去会跳过收尾（设备还原 + failed 清单），把手机留在改过分辨率/
+    无障碍的状态。证据留在盘上，清单记失败原因，分片按失败重采。
+    """
+    try:
+        return collect_list_observation(category)
+    except C.CaptureContractError as exc:
+        die(f"列表观测失败：{exc}")
+    except OBS.QNHListEvidenceError as exc:
+        die(f"列表证据复算失败：{exc}")
+    except Exception as exc:
+        die(f"列表观测异常：{type(exc).__name__}: {exc}")
+
+
+def collect_list_observation(category):
+    directory = os.path.join(CTX.out_dir, f"qnh_scan_{CTX.run_stamp}.list_evidence")
+    os.makedirs(directory, exist_ok=True)
+    nodes, products = reset_to_top_verified(category)
+    if not products:
+        raise C.CaptureContractError("列表观测无法回顶，不能证明可见列表已采全")
+    pages, files = [], []
+    previous = None
+    for index in range(150):
+        xml = dump_xml()
+        path = os.path.join(directory, f"page_{index:03d}.xml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(xml)
+        pages.append(xml)
+        files.append({"path": path, "sha256": C.sha256_file(path)})
+        nodes = parse_nodes(xml)
+        products = find_products(nodes, detect_watermarks(nodes))
+        signature = [(p["title"], p["barcode"], p["spec"]) for p in products]
+        if signature == previous and any(n["text"] == LIST_END_MARKER for n in nodes):
+            result = OBS.audit_pages(pages, category)
+            result.update(schema_version=1, category=category, pages=files)
+            evidence = os.path.join(directory, "inventory.json")
+            C.atomic_write_json(evidence, result)
+            CTX.list_evidence = evidence
+            if result["platform_count"] != len(result["cards"]):
+                CTX.observation_exceptions.append({
+                    "type": "platform_count_mismatch", "platform_count": result["platform_count"],
+                    "visible_card_count": len(result["cards"]),
+                })
+            restored_nodes, restored_products = reset_to_top_verified(category)
+            if not restored_products:
+                raise C.CaptureContractError("列表观测后无法回顶继续采集")
+            return result, restored_nodes, restored_products
+        previous = signature
+        if not products:
+            raise C.CaptureContractError("列表观测遇到空页，不能跳过未知区间")
+        scroll_list(*screen_size(), PACING["ultra"], anchor=products[-1])
+        time.sleep(0.5)
+    raise C.CaptureContractError("列表观测未在150屏内确认读尽，保留证据后停止")
+
+
+def coverage_snapshot(rows):
+    """记录已解析身份集合；它不是卡片张数证明，不能用于短收放行。"""
+    parsed = set(CTX.parsed_cards)
+    captured = {(C.normalize_name(row.get("规格") or ""),
+                 C.normalize_name(row.get("商品名称") or ""))
+                for row in rows}
+    parsed_specs = {spec for spec, _ in parsed}
+    unresolved = sorted(spec for spec in CTX.orphan_specs if spec not in parsed_specs)
+    return {
+        "list_exhausted": bool(CTX.list_end_marker),
+        "end_marker": LIST_END_MARKER,
+        "rendered_cards": len(parsed),
+        "captured_cards": len(captured),
+        "cards_match": parsed == captured,
+        "unresolved_specs": unresolved,
+        "platform_title_count": CTX.target_count,
+        "identity_only": True,
+    }
 
 
 def _manifest_paths(csv_path):
@@ -1704,6 +1867,10 @@ def _manifest_for(csv_path, state):
         "expected_product_count": CTX.target_count,
         "requested_count": CTX.capture_options.get("requested_count"),
     }
+    if any(row.get("状态") == "多SKU" for row in rows):
+        sku_path = C.source_prefix(csv_path) + ".skus.json"
+        artifacts.update(sku_path=sku_path, sku_sha256=C.sha256_file(sku_path))
+        scope["sku_mode"] = "sidecar_v1"
     capture = {
         "method": "app_ui",
         "started_at": CTX.started_at.isoformat(timespec="seconds") if CTX.started_at else None,
@@ -1712,8 +1879,39 @@ def _manifest_for(csv_path, state):
         "finished_at": CTX.finished_at.isoformat(timespec="seconds") if CTX.finished_at else None,
         "collector_version": scanner_version(),
         **CTX.capture_options,
+        "metrics": scan_metrics(),
     }
-    return C.build_manifest(
+    # 观测内容先算出来：契约标记、详情完整数、例外清单都从它派生。
+    # 观测模式跑出的普通成功产物（没有任何例外）不该挂 v1 契约——挂了就是
+    # 「声称在观测契约下」却拿不出观测内容，入库入口也会被它拦。
+    unknown_cards = set()
+    child_observations = []
+    exceptions = []
+    if CTX.observe_exceptions:
+        unknown_cards = {index for index, children in CTX.sku_rows.items()
+                         if any(child.get("_channel_observations") for child in children)}
+        for row in CTX.sku_rows.values():
+            for child in row:
+                for channel, observation in (child.get("_channel_observations") or {}).items():
+                    entry = {"type": "channel_row_absent", "sku": child.get("SKU"),
+                             "channel": channel, "spec": child.get("规格")}
+                    # 凭据原样带进 manifest：区块状态、原因、详情 XML 证据指针。
+                    # 只留 sku/channel/spec 的重建条目等于把证据丢了——manifest
+                    # 单读就看不出这条「行缺失」凭什么成立。
+                    for key in ("observation", "section_status", "reason",
+                                "evidence_pages"):
+                        value = (observation or {}).get(key)
+                        if value is not None:
+                            entry[key] = value
+                    child_observations.append(entry)
+        exceptions = [item for item in CTX.observation_exceptions
+                      if item.get("type") != "channel_row_absent"] + child_observations
+    if exceptions:
+        capture["observation_contract"] = C.OBSERVATION_CONTRACT_VERSION
+    if CTX.observe_exceptions and CTX.list_evidence:
+        artifacts.update(list_evidence_path=CTX.list_evidence,
+                         list_evidence_sha256=C.sha256_file(CTX.list_evidence))
+    manifest = C.build_manifest(
         capture_id=CTX.capture_id,
         batch_id=CTX.batch_id,
         run_id=CTX.run_id,
@@ -1726,7 +1924,22 @@ def _manifest_for(csv_path, state):
         rows=rows,
         stop_reason=CTX.stop_reason,
         parent_manifest_sha256=CTX.parent_manifest_sha256,
+        coverage=coverage_snapshot(rows) or None,
     )
+    if scope.get("sku_mode"):
+        manifest["progress"].update(
+            listing_count=len(rows),
+            sku_row_count=sum(len(CTX.sku_rows.get(int(r["序号"]), []))
+                              if r.get("状态") == "多SKU" else 1 for r in rows),
+        )
+    if CTX.observe_exceptions:
+        manifest["progress"]["detail_complete_count"] -= len(unknown_cards)
+        manifest["progress"].update(
+            observation_complete=state in {"observed_with_exceptions", "success"},
+            business_complete=False if exceptions else state == "success",
+            exceptions=exceptions,
+        )
+    return manifest
 
 
 def write_checkpoint():
@@ -1759,6 +1972,7 @@ def write_csv():
         if os.path.lexists(path):
             raise C.CaptureContractError(f"本次 CSV 路径已存在，拒绝覆盖：{path}")
         CTX.csv_path = path
+    sidecar = None
     tmp = path + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
@@ -1767,7 +1981,36 @@ def write_csv():
                     for row in CTX.rows)
         f.flush()
         os.fsync(f.fileno())
+    if any(row[5] == "多SKU" for row in CTX.rows):
+        listings, observations = {}, {}
+        for row in CTX.rows:
+            if row[5] != "多SKU":
+                continue
+            listing = dict(zip(C.FULL_COLUMNS, row + card_cols(
+                row[1], row[2], index=row[0]) + [""] * len(DETAIL_COLUMNS)))
+            children = []
+            for detail in CTX.sku_rows.get(int(row[0]), []):
+                metadata = detail.get("_channel_observations")
+                if metadata:
+                    observations.setdefault(str(row[0]), {})[str(detail.get("SKU"))] = metadata
+                child = dict(listing)
+                child.update({k: v for k, v in detail.items()
+                              if k in C.DETAIL_COLUMNS or k in ("规格", "条码")})
+                child["状态"] = "成功"
+                child["店内码"] = ""
+                child["货号"] = ""
+                children.append(child)
+            listings[str(row[0])] = children
+        sidecar = {
+            "schema_version": 1, "listings": listings,
+            **({"observations": observations} if observations else {}),
+        }
     os.replace(tmp, path)
+    if sidecar is not None:
+        # sidecar 在 CSV 落盘之后才写：sidecar 描述的是这份 CSV，绝不能先于
+        # CSV 出现（先出现就是「凭据指向一份还不存在的 CSV」）。atomic_write_json
+        # 自身是 tmp+replace，写入过程也不会露出半截文件。
+        C.atomic_write_json(C.source_prefix(path) + ".skus.json", sidecar)
     return path
 
 
@@ -1797,11 +2040,28 @@ def cleanup():
                 state = "partial"
             else:
                 rows, _ = C.read_csv_rows(path)
-                complete = (CTX.target_count is not None
-                            and len(rows) == CTX.target_count
-                            and all(row.get("状态") in C.COMPLETE_ROW_STATUSES for row in rows)
-                            and all(not C.row_detail_errors(row) for row in rows))
+                rows_ok = (all(row.get("状态") in C.COMPLETE_ROW_STATUSES for row in rows)
+                           and all(not C.row_detail_errors(row) for row in rows))
+                coverage = coverage_snapshot(rows)
+                complete = (CTX.target_count is not None and rows_ok
+                            and (len(rows) == CTX.target_count
+                                 or C.coverage_allows_shortfall(
+                                     coverage, CTX.target_count)))
                 state = "interrupted" if CTX.interrupted else ("success" if complete else "partial")
+                if CTX.observe_exceptions and not CTX.interrupted and CTX.list_evidence:
+                    evidence = C.read_json(CTX.list_evidence)
+                    # 升级到观测终态要身份对得上，不是张数对得上：漏一张又错收
+                    # 一张，张数照样相等，但采到的不是这一页的东西。
+                    mismatch = C.cards_match_rows(evidence.get("cards") or [], rows)
+                    if mismatch:
+                        CTX.stop_reason = CTX.stop_reason or (
+                            f"列表证据与采集行身份不一致：{mismatch}")
+                        state = "partial"
+                        warn(CTX.stop_reason)
+                    elif rows_ok:
+                        has_unknown = any(child.get("_channel_observations")
+                                          for children in CTX.sku_rows.values() for child in children)
+                        state = "observed_with_exceptions" if (CTX.observation_exceptions or has_unknown) else "success"
         manifest = finalize_manifest(path, state)
         if manifest:
             info(f"运行清单已写入 {manifest}（{state}）")
@@ -1976,7 +2236,7 @@ def product_identity(product_or_title, barcode=None, spec=None):
     barcode_value = C.text_value(barcode)
     spec_value = C.normalize_name(spec)
     return ((barcode_value, "", spec_value) if barcode_value
-            else ("", C.normalize_name(title), ""))
+            else ("", C.normalize_name(title), spec_value))
 
 
 def remember_row_product(index, prod):
@@ -2043,7 +2303,7 @@ def wait_list_after_scroll(sw, sh_, retries=5):
     for attempt in range(retries):
         nodes, products = dump_products()
         last_nodes = nodes
-        if products:
+        if products and not on_list_child_page(nodes):
             if attempt:
                 info(f"    （列表渲染等待 {time.time() - t0:.1f}s / {attempt} 次）")
             return nodes, products
@@ -2062,6 +2322,45 @@ def wait_list_after_scroll(sw, sh_, retries=5):
     time.sleep(0.8)
     nodes, products = dump_products()
     return nodes or last_nodes, products
+
+
+def overlapping_pages(previous, current):
+    before = [product_identity(product) for product in previous]
+    after = [product_identity(product) for product in current]
+    return any(before[-size:] == after[:size]
+               for size in range(1, min(len(before), len(after)) + 1))
+
+
+def advance_product_list(previous, sw, sh_, pace, *, fast=True):
+    anchor = previous[-1] if previous else None
+    with measured("scroll"):
+        if fast and anchor is not None and sh_ >= 3500:
+            distance = max(SCROLL_MIN, min(anchor["box"][1] - int(sh_ * LIST_TOP_Y),
+                                           int(sh_ * 0.60)))
+            x, y = int(sw * 0.65), int(sh_ * 0.80)
+            duration = int(distance / TALL_SCROLL_SPEED)
+            human_swipe(x, y, x, y - distance, (duration, duration))
+            time.sleep(0.5)
+        else:
+            scroll_list(sw, sh_, pace, anchor=anchor)
+    with measured("list_wait"):
+        nodes, products = wait_list_after_scroll(sw, sh_)
+        if not previous or not products:
+            return nodes, products
+        if overlapping_pages(previous, products):
+            CTX.traversal_counts["pages"] = CTX.traversal_counts.get("pages", 0) + 1
+            return nodes, products
+    CTX.traversal_counts["local_repairs"] = CTX.traversal_counts.get("local_repairs", 0) + 1
+    with measured("local_repair"):
+        for _ in range(4):
+            distance = min(700, int(sh_ * 0.2))
+            x, y = int(sw * 0.65), int(sh_ * 0.4)
+            sh(f"input swipe {x} {y} {x} {y + distance} {int(distance / SCROLL_SPEED)}")
+            time.sleep(0.5)
+            nodes, products = wait_list_after_scroll(sw, sh_)
+            if products and overlapping_pages(previous, products):
+                return nodes, products
+    raise C.CaptureContractError("翻页连续性无法确认，已停止并保留断点，禁止跳过未知区间")
 
 
 def close_gap(new, prev_last, sw, sh_, max_back=3):
@@ -2095,8 +2394,10 @@ def close_gap(new, prev_last, sw, sh_, max_back=3):
 
 
 def detail_fingerprint(nodes):
-    detail = parse_detail(nodes)
-    return tuple(C.text_value(detail.get(key)) for key in ("开放平台标识", "SPU", "SKU"))
+    detail = parse_detail([n for n in nodes if not SKU_PAT.match(n.get("text") or "")])
+    skus = tuple(sorted({SKU_PAT.match(n["text"]).group(1) for n in nodes
+                         if SKU_PAT.match(n.get("text") or "")}))
+    return (C.text_value(detail.get("开放平台标识")), C.text_value(detail.get("SPU")), skus)
 
 
 def normalized_digits(value):
@@ -2107,6 +2408,20 @@ def detail_matches_product(nodes, prod):
     """Require detail identity, not merely the reused MRN '商品详情' shell."""
     if not is_detail_page(nodes):
         return False
+    if len({SKU_PAT.match(n["text"]).group(1) for n in nodes
+            if SKU_PAT.match(n.get("text") or "")}) > 1:
+        title = C.normalize_name(prod.get("title"))
+        names = [C.normalize_name(n.get("text")) for n in nodes if n.get("detail_title")]
+        if not title or not any(name in (title, title + "0") for name in names):
+            return False
+        barcode = normalized_digits(prod.get("barcode"))
+        identities = {normalized_digits(SKU_PAT.match(n["text"]).group(1)) for n in nodes
+                      if SKU_PAT.match(n.get("text") or "")}
+        identities.update(normalized_digits(DETAIL_UPC_PAT.match(n["text"]).group(1))
+                          for n in nodes if DETAIL_UPC_PAT.match(n.get("text") or "")
+                          and n["x1"] < 350)
+        return bool(any(SPU_PAT.match(n.get("text") or "") for n in nodes)
+                    and (not barcode or barcode in identities))
     barcode = normalized_digits(prod.get("barcode"))
     detail = parse_detail(nodes)
     detail_upc = normalized_digits(detail.get("条码"))
@@ -2117,9 +2432,13 @@ def detail_matches_product(nodes, prod):
         # ≥14 位内部码：详情页可能把它摆在「条码」（如 16978497750788 的自建
         # 商品，SKU 另有 19 位平台码），也可能摆在「SKU」。两者任一相等即认。
         return detail_sku == barcode or detail_upc == barcode
-    fingerprint = tuple(C.text_value(detail.get(key))
-                        for key in ("开放平台标识", "SPU", "SKU"))
-    return bool(any(fingerprint) and fingerprint != CTX.last_detail_fingerprint)
+    title = C.normalize_name(prod.get("title"))
+    spec = C.normalize_name(prod.get("spec"))
+    names = [C.normalize_name(n.get("text")) for n in nodes if n.get("detail_title")]
+    # ponytail: 真机 XML 的详情标题尾随界面数字 0；仅对结构锚定的标题容忍这一值。
+    return bool(detail.get("SKU") and detail.get("SPU") and title and spec
+                and C.normalize_name(detail.get("规格_身份")) == spec
+                and any(name == title or name == title + "0" for name in names))
 
 
 def open_detail(prod, load, tries=2, *, screen=None, pace=None):
@@ -2137,6 +2456,9 @@ def open_detail(prod, load, tries=2, *, screen=None, pace=None):
         # 误触出列表外）。点击前先把它滚到视口上部，一次都不浪费。
         nodes = parse_nodes(dump_xml())
         seated = relocate(prod, nodes)
+        if seated is None:
+            return False
+        prod = seated
         tap_screen = screen or screen_size()
         if (seated and not is_detail_page(nodes)
                 and seated["tap"][1] > max((n["y2"] for n in nodes),
@@ -2145,7 +2467,9 @@ def open_detail(prod, load, tries=2, *, screen=None, pace=None):
                         pace or PACING["ultra"], anchor=seated)
             time.sleep(0.4)
             nodes = parse_nodes(dump_xml())
-            prod = relocate(prod, nodes) or seated
+            prod = relocate(prod, nodes)
+            if prod is None:
+                return False
         # 商品详情标题点击必须走直接 ADB：2026-10-12 shard46 三件顽固
         # "未打开"用同一动态 bounds 的 input tap 均一次成功，Helper tap
         # 则跨多轮失败。身份校验仍在下方逐条码/SKU执行。
@@ -2285,6 +2609,52 @@ def collect_tall_detail(prod, nodes, sw, sh_, timeout=2.8):
     return detail, found, values, nodes
 
 
+def collect_sku_detail(prod, nodes, sw, sh_):
+    pages = [nodes]
+    started_at_top = any(n.get("detail_title") for n in nodes)
+    if not started_at_top:
+        raise C.CaptureContractError("多 SKU 详情缺少首屏身份区，不能从中途开始采集")
+    for _ in range(16):
+        bottom_fields = any(n.get("text") == "店内码/货号" and n.get("h", 0) > 0
+                            for n in pages[-1])
+        if bottom_fields:
+            rows = SKU_CAPTURE.parse_sku_pages(pages)
+            if any(row.get("_channel_observations") for row in rows):
+                if not CTX.observe_exceptions:
+                    raise C.CaptureContractError("渠道 SKU 行缺失：需显式 --observe-exceptions 保存未知观测")
+                evidence = []
+                for index, page in enumerate(pages):
+                    path = os.path.join(CTX.out_dir, f"qnh_scan_{CTX.run_stamp}.detail_{CTX.detail_attempts}_{index}.xml")
+                    root = ET.Element("hierarchy")
+                    for node in page:
+                        ET.SubElement(root, "node", text=node.get("text", ""),
+                                      bounds=f"[{node['x1']},{node['y1']}][{node['x2']},{node['y2']}]")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(ET.tostring(root, encoding="unicode"))
+                    evidence.append({"path": path, "sha256": C.sha256_file(path)})
+                for row in rows:
+                    for channel, observation in row.get("_channel_observations", {}).items():
+                        observation["evidence_pages"] = evidence
+                        CTX.observation_exceptions.append({
+                            "type": "channel_row_absent", "sku": row.get("SKU"),
+                            "channel": channel, "spec": row.get("规格"),
+                            "evidence_pages": evidence,
+                        })
+            for row in rows:
+                errors = C.row_detail_errors(row)
+                observed_channels = row.get("_channel_observations", {}) if CTX.observe_exceptions else {}
+                errors = [error for error in errors
+                          if not (error.endswith("详情") and error[:-2] in observed_channels)]
+                if errors:
+                    raise C.CaptureContractError("SKU " + str(row.get("SKU"))
+                                                 + " 详情不全：" + "/".join(errors))
+            return rows
+        human_swipe(sw // 2, int(sh_ * 0.76), sw // 2, int(sh_ * 0.42), (700, 700))
+        time.sleep(0.6)
+        pages.append(dump_nodes_undisturbed("多 SKU 详情逐屏采集"))
+    raise C.CaptureContractError("多 SKU 详情未在16次滚动内证实到底，已停止保留断点")
+
+
 def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
                   verify, max_scrolls):
     """
@@ -2305,37 +2675,7 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
         remember_row_product(idx, prod)
         return time.time() - t0
 
-    # 每日增量：指纹一致的商品不点详情页，直接写携带行。卡片此刻可能
-    # 只露出一半（read_card 返回 None）；翻页后完整露出时会更新 CTX.cards，
-    # 因此这里拿不到完整卡片就当"有变化"处理，走完整详情页路径。
-    if CTX.carry_baseline is not None:
-        listing = C.listing_identity(prod["title"], prod["barcode"])
-        baseline_entry = CTX.carry_baseline.get(listing)
-        card = CTX.cards.get(product_identity(prod))
-        if baseline_entry is not None and card:
-            detail_values = compare_card_baseline(card, baseline_entry)
-            if detail_values is None:
-                # RN list cards can briefly expose stale/partial values during FlatList
-                # remounting, then overwrite CTX.cards with the settled card later. One
-                # fresh read avoids an unnecessary 9–12s detail visit; a persistent
-                # mismatch still follows the strict detail path.
-                time.sleep(0.18)
-                refreshed_nodes = parse_nodes(dump_xml())
-                if not blocking_dialog(refreshed_nodes):
-                    refreshed = next((item for item in find_products(
-                        refreshed_nodes, detect_watermarks(refreshed_nodes))
-                                      if same_product(item, prod)), None)
-                    if refreshed is not None:
-                        prod = refreshed
-                        settled_card = CTX.cards.get(product_identity(prod))
-                        if settled_card:
-                            detail_values = compare_card_baseline(
-                                settled_card, baseline_entry)
-            if detail_values is not None:
-                CTX.carry_seen.add(listing)
-                _carry_row(idx, prod, detail_values)
-                return time.time() - t0
-
+    CTX.detail_attempts += 1
     if not open_detail(prod, load, screen=(sw, sh_), pace=pace):
         return skip("未打开", "详情页没打开，已跳过")
 
@@ -2370,6 +2710,19 @@ def visit_product(idx, prod, n_scroll, back, sw, sh_, pace,
         detail = parse_detail(current_nodes) if verify else {}
 
     # 高屏快路径：一套就绪循环拿齐整页字段，不进入下面普通屏的多轮 dump/补滑。
+    if verify and len({SKU_PAT.match(n["text"]).group(1) for n in current_nodes
+                       if SKU_PAT.match(n.get("text") or "")}) > 1:
+        variants = collect_sku_detail(prod, current_nodes, sw, sh_)
+        wait_while_dialog("多 SKU 返回前")
+        tap_back(back)
+        time.sleep(random.uniform(0.45, 0.65))
+        recover_list_child_after_back()
+        CTX.rows.append([idx, prod["title"], prod["barcode"], "", "",
+                         "多SKU", offset, *capture_meta()])
+        remember_row_product(idx, prod)
+        CTX.sku_rows[idx] = variants
+        info(f"[{idx:>3}] ✓ {title}：{len(variants)} 个 SKU 已分别采集")
+        return time.time() - t0
     if verify and sh_ >= 3500:
         detail, found, values, current_nodes = collect_tall_detail(
             prod, current_nodes, sw, sh_)
@@ -2860,6 +3213,27 @@ def reset_category_to_top(category):
         return [], []
 
 
+def reset_to_top_verified(category):
+    """回顶并校验类目仍然选中。
+
+    ensure_list_page 只证明"当前在列表页"，它完全可能正停在列表底部：旧
+    实现看到非空就跳过 reset_category_to_top，于是"回顶"实际是从底部重
+    扫（原地打转，中间那段永远补不到）。这里必须真的回顶——切到全部商品再
+    切回叶子类目，MRN 会把叶子列表复位到顶——并校验类目仍然选中。回顶失
+    败返回 ([], [])，让调用方停下，而不是假装已经回到顶部。
+    """
+    list_nodes, list_products = ensure_list_page()
+    if (list_products and category
+            and not category_selection_valid(category, list_nodes)):
+        restore_category_after_navigation(category)
+    reset_nodes, reset_products = reset_category_to_top(category)
+    if not reset_products:
+        return [], []
+    if category and not category_selection_valid(category, reset_nodes):
+        return [], []
+    return reset_nodes, reset_products
+
+
 def selected_list_count(nodes, expected_title):
     screen_width = max((node["x2"] for node in nodes), default=0)
     candidates = []
@@ -3074,8 +3448,7 @@ def main():
     ap.add_argument("--dismiss-order-dialogs", action="store_true",
                     help="关闭‘顾客修改了订单信息’弹窗的‘我知道了’按钮（需业务授权）")
     ap.add_argument("--carry-baseline", metavar="JSON",
-                    help="每日增量携带基线：指纹一致的商品跳过详情页，"
-                         "详情列沿用基线（由 qnh_daily_baseline.py 导出）")
+                    help="已停用；历史详情没有当日来源证明，必须重新实访")
     ap.add_argument("--profile", help="config/qnh_capture_profiles.json 中的门店 profile")
     ap.add_argument("--profiles-file", default=C.DEFAULT_PROFILE_FILE,
                     help="门店 profile 文件")
@@ -3083,6 +3456,8 @@ def main():
     ap.add_argument("--batch-id", help="稳定 batch UUID（通常由 pipeline 生成）")
     ap.add_argument("--run-id", help="本次运行 UUID")
     ap.add_argument("--manifest-output", help="final manifest 输出路径")
+    ap.add_argument("--observe-exceptions", action="store_true",
+                    help="本地观测模式：有证据的缺行和计数差独立留痕，不标业务完整")
     ap.add_argument("--category", help="采集范围标签，如 休闲零食/薯片薯条")
     args = ap.parse_args()
 
@@ -3098,6 +3473,8 @@ def main():
             except ValueError:
                 ap.error(f"--{name.replace('_', '-')} 必须是 UUID")
 
+    if args.observe_exceptions and (args.verify_every != 1 or not args.category):
+        ap.error("--observe-exceptions 要求 --verify-every 1 和明确叶子类目")
     if args.seed is not None:
         random.seed(args.seed)
 
@@ -3123,7 +3500,7 @@ def main():
             if not parent_report.ok:
                 die("父 manifest 校验失败：\n" + C.format_gate_report(parent_report))
             parent_manifest = parent_report.manifest
-            if parent_manifest.get("state") not in {"success", "partial", "interrupted", "failed"}:
+            if parent_manifest.get("state") not in {"success", "partial", "interrupted", "failed", "observed_with_exceptions"}:
                 die(f"父 manifest 不是可续跑的终态：{parent_manifest.get('state')}")
             resume_csv = parent_manifest["artifacts"]["csv_path"]
             parent_scope = parent_manifest["scope"]
@@ -3135,6 +3512,9 @@ def main():
             resume_csv = candidate
 
     if parent_manifest:
+        if (parent_manifest.get("capture") or {}).get("observation_contract"):
+            if not args.observe_exceptions:
+                die("异常观测工件续跑必须显式 --observe-exceptions，不能降级为普通采集")
         parent_profile = parent_manifest["profile"]
         trusted_profile = profile or C.load_profile(parent_profile["name"], args.profiles_file)
         profile_errors = C.profile_mismatches(parent_profile, trusted_profile)
@@ -3170,6 +3550,9 @@ def main():
     CTX.adb = args.adb
     CTX.profile = profile
     CTX.dismiss_order_dialogs = bool(args.dismiss_order_dialogs)
+    CTX.observe_exceptions = bool(args.observe_exceptions)
+    CTX.list_evidence = None
+    CTX.observation_exceptions = []
     CTX.profiles_file = os.path.abspath(args.profiles_file)
     parent_device = C.text_value((parent_manifest or {}).get("device_id"))
     CTX.serial = args.serial or parent_device or ((profile or {}).get("default_device_serial"))
@@ -3190,6 +3573,11 @@ def main():
         CTX.run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S") + f"_{CTX.run_id[:8]}"
     CTX.category = args.category
     CTX.run_started_at = datetime.now()
+    CTX.timings = {}
+    CTX.traversal_counts = {}
+    CTX.detail_attempts = 0
+    CTX.carried_this_run = 0
+    CTX.metrics_started = time.monotonic()
     parent_started = C.text_value(((parent_manifest or {}).get("capture") or {}).get("started_at"))
     try:
         parent_started_at = datetime.fromisoformat(parent_started) if parent_started else None
@@ -3342,6 +3730,13 @@ def main():
         args.count = platform_total
         info(f"范围模式：{total_text} → 目标 {args.count} 个")
 
+    if args.observe_exceptions:
+        observed, nodes, products = observe_list_or_die(CTX.category)
+        if observed["platform_count"] != CTX.target_count:
+            die("列表观测期间平台标题数变化，不能混合采集目标")
+        args.count = len(observed["cards"])
+        info(f"观测目标：可见卡片 {args.count}；平台原数 {CTX.target_count} 保留，不标业务完整")
+
     info(f"当前屏识别到 {len(products)} 个商品：")
     for i, p in enumerate(products, 1):
         info(f"    {i}. {p['title'][:40]}  "
@@ -3419,21 +3814,26 @@ def main():
         t_start = time.time()
         stop_reason = ""
         last_keys = {product_identity(product) for product in first_screen}
+        page_products = list(first_screen)
+        attempted_ids = set()
+        page_detail_attempts = CTX.detail_attempts
         screen_last = first_screen[-1]      # 当前屏最下面一个商品（翻页连续性的锚）
         skipping_noted = False
         top_reset_done = False
-        fast_resume_search = bool(
-            CTX.resumed and done < args.count and sh_ >= 3500
-            and HelperState.has_semantic_scroll)
+        fast_resume_search = bool(sh_ >= 3500 and HelperState.has_semantic_scroll)
         scan_screens = 1
         scan_identities = set(last_keys)
         if fast_resume_search:
-            info(f"续跑快速定位：语义翻页寻找 {args.count - done} 个缺口；"
-                 "若快速扫到底仍缺，会自动回顶部精确补扫")
+            info(f"重叠校验快速遍历：待处理 {args.count - done} 个；"
+                 "跨屏不连续就局部回拉，不跳过未知卡片")
+
+        navigation_seen = set(last_keys)
+        navigation_path = os.path.join(CTX.out_dir, f"qnh_scan_{CTX.run_stamp}.navigation")
 
         def retry_from_top():
             nonlocal products, cursor, first_screen, last_keys, screen_last, top_reset_done
-            nonlocal fast_resume_search, scan_screens, scan_identities
+            nonlocal fast_resume_search, scan_screens, scan_identities, page_products
+            nonlocal nodes, page_detail_attempts
             if top_reset_done or not CTX.category or len(CTX.rows) >= args.count:
                 return False
             top_reset_done = True
@@ -3441,25 +3841,81 @@ def main():
             fast_resume_search = False
             info(f"{mode}但仍缺 {args.count - len(CTX.rows)} 个；"
                  "重置类目到顶部，改用精确锚点补扫")
-            nodes2, products2 = reset_category_to_top(CTX.category)
-            if not products2 or not category_selection_valid(CTX.category, nodes2):
+            with measured("category_reset"):
+                # 必须真回顶：ensure_list_page 只保证"在列表页"，可能正停在底
+                # 部；拿底部当"顶部"补扫等于原地打转。回顶失败就停下，不假装
+                # 回到顶部。
+                list_nodes, list_products = reset_to_top_verified(CTX.category)
+            CTX.traversal_counts["full_backfills"] = CTX.traversal_counts.get("full_backfills", 0) + 1
+            if not list_products or not category_selection_valid(CTX.category, list_nodes):
                 return False
-            first_screen = list(products2)
-            last_keys = {product_identity(product) for product in products2}
-            screen_last = products2[-1]
+            first_screen = list(list_products)
+            nodes = list_nodes
+            page_detail_attempts = CTX.detail_attempts
+            page_products = list(list_products)
+            last_keys = {product_identity(product) for product in list_products}
+            screen_last = list_products[-1]
             scan_screens = 1
             scan_identities = set(last_keys)
+            navigation_seen.clear()
+            navigation_seen.update(last_keys)
             marks2 = resume_marks()
-            products = [product for product in products2 if not is_done(product, marks2)]
+            products = [product for product in list_products if not is_done(product, marks2)]
             cursor = 0
             return True
 
         while done < args.count and not CTX.interrupted:
             if cursor >= len(products):
-                # 续跑第一遍用语义翻页快速找稀疏缺口；兜底遍才用精确锚点。
-                scroll_list(sw, sh_, pace,
-                            anchor=None if fast_resume_search else screen_last)
-                _, new = wait_list_after_scroll(sw, sh_)
+                if CTX.detail_attempts != page_detail_attempts:
+                    with measured("list_wait"):
+                        current_nodes, current_products = dump_products()
+                else:
+                    current_nodes, current_products = nodes, page_products
+                if not current_products or not category_selection_valid(CTX.category, current_nodes):
+                    # 详情返回后 MRN 列表会短暂重建：原地等，再按既有路径恢复类目，
+                    # 都失败才回顶重走，绝不因为一次空窗就中止整轮。
+                    with measured("list_wait"):
+                        current_nodes, current_products = wait_product_list_ready()
+                    if (current_products and CTX.category
+                            and not category_selection_valid(CTX.category, current_nodes)):
+                        current_nodes, current_products = restore_category_after_navigation(
+                            CTX.category)
+                    if not current_products:
+                        # 详情页打不开时 App 可能停在子页：先按返回层级找回列表。
+                        with measured("list_wait"):
+                            current_nodes, current_products = ensure_list_page()
+                        if (current_products and CTX.category
+                                and not category_selection_valid(CTX.category, current_nodes)):
+                            current_nodes, current_products = restore_category_after_navigation(
+                                CTX.category)
+                if not current_products:
+                    if retry_from_top():
+                        continue
+                    stop_reason = "翻页前无法确认当前类目与卡片，已停止并保留断点"
+                    warn(stop_reason)
+                    break
+                if not overlapping_pages(page_products, current_products):
+                    # 位置连续性无法证明：回顶按已确认前缀重走，不跳过未知区间。
+                    CTX.traversal_counts["unproven_positions"] = (
+                        CTX.traversal_counts.get("unproven_positions", 0) + 1)
+                    if retry_from_top():
+                        continue
+                    stop_reason = "翻页后列表位置无法证明连续，已停止并保留断点"
+                    warn(stop_reason)
+                    break
+                page_products = current_products
+                marks = resume_marks()
+                pending = [p for p in current_products
+                           if product_identity(p) not in attempted_ids and not is_done(p, marks)]
+                if pending:
+                    products, cursor = pending, 0
+                    continue
+                last_keys = {product_identity(p) for p in current_products}
+                repairs_before = CTX.traversal_counts.get("local_repairs", 0)
+                category_nodes, new = advance_product_list(
+                    page_products, sw, sh_, pace, fast=fast_resume_search)
+                if CTX.traversal_counts.get("local_repairs", 0) > repairs_before:
+                    fast_resume_search = False
                 if not new:
                     recovery_nodes, recovery_products = dump_products()
                     if (CTX.category and recovery_products
@@ -3470,6 +3926,7 @@ def main():
                     if recovery_products and (not CTX.category or category_selection_valid(
                             CTX.category, recovery_nodes)):
                         new = recovery_products
+                        category_nodes = recovery_nodes
                     else:
                         if retry_from_top():
                             continue
@@ -3477,8 +3934,6 @@ def main():
                                        "不会盲按返回退出 App。可用 --resume 续跑。")
                         warn(stop_reason)
                         break
-                if sh_ < 3500:
-                    new = close_gap(new, screen_last, sw, sh_)
                 new_keys = {product_identity(product) for product in new}
                 if new_keys == last_keys:
                     # 翻页后画面没变：可能是分页懒加载还没渲染出下一屏，多等
@@ -3486,16 +3941,14 @@ def main():
                     advanced = False
                     for _ in range(LAZY_LOAD_RETRIES):
                         time.sleep(0.8 if sh_ >= 3500 else 1.6)
-                        scroll_list(sw, sh_, pace,
-                                    anchor=None if fast_resume_search else screen_last)
-                        _, candidate = wait_list_after_scroll(sw, sh_)
+                        candidate_nodes, candidate = advance_product_list(
+                            page_products, sw, sh_, pace, fast=fast_resume_search)
                         if not candidate:
                             continue
-                        if sh_ < 3500:
-                            candidate = close_gap(candidate, screen_last, sw, sh_)
                         candidate_keys = {product_identity(product) for product in candidate}
                         if candidate_keys and candidate_keys != last_keys:
                             new, new_keys = candidate, candidate_keys
+                            category_nodes = candidate_nodes
                             info("（等到了新加载的商品）")
                             advanced = True
                             break
@@ -3510,7 +3963,6 @@ def main():
                     warn(stop_reason)
                     break
                 if CTX.category:
-                    category_nodes = parse_nodes(dump_xml())
                     if not category_selection_valid(CTX.category, category_nodes):
                         warn(f"翻页后类目选择丢失，重新定位：{CTX.category}")
                         category_nodes, new = restore_category_after_navigation(CTX.category)
@@ -3518,10 +3970,17 @@ def main():
                             stop_reason = "无法恢复当前类目，已安全停止；可用 --resume 续跑。"
                             warn(stop_reason)
                             break
+                page_products = list(new)
+                nodes = category_nodes
+                page_detail_attempts = CTX.detail_attempts
                 last_keys = {product_identity(product) for product in new}
                 screen_last = new[-1]
                 scan_screens += 1
                 scan_identities.update(last_keys)
+                if last_keys - navigation_seen:
+                    navigation_seen.update(last_keys)
+                    with open(navigation_path, "w", encoding="utf-8") as fh:
+                        fh.write(str(len(navigation_seen)))
                 if scan_screens % 5 == 0:
                     mode = "快速" if fast_resume_search else "精确"
                     info(f"— {mode}扫描进度：{scan_screens} 屏，"
@@ -3625,13 +4084,32 @@ def main():
             done += 1
             verify = (args.verify_every > 0 and
                       done % args.verify_every == 0)
+            attempted_ids.add(product_identity(target))
+            product_started = time.monotonic()
             visit_product(done, target, n_scroll, back,
                           sw, sh_, pace, verify, args.max_scrolls)
+            if CTX.rows[-1][5] == "未打开" and not CTX.interrupted:
+                # 详情页第一次没打开：原地再点一次（App 可能刚回到列表），
+                # 仍失败就留给续跑重做，不让它把整片拖到末尾才发现。
+                with measured("local_product_retry"):
+                    _, retry_products = ensure_list_page()
+                    retry_target = next((p for p in retry_products
+                                         if same_product(p, target)), None)
+                    if retry_target is not None:
+                        CTX.rows.pop()
+                        visit_product(done, retry_target, n_scroll, back,
+                                      sw, sh_, pace, verify, args.max_scrolls)
+                        CTX.traversal_counts["local_product_retries"] = (
+                            CTX.traversal_counts.get("local_product_retries", 0) + 1)
+            product_stage = "carry" if CTX.rows[-1][5] == CARRY_STATUS else "detail"
+            CTX.timings[product_stage] = (CTX.timings.get(product_stage, 0.0)
+                                         + time.monotonic() - product_started)
             cursor += 1
             if (args.checkpoint_every > 0
                     and len(CTX.rows) % args.checkpoint_every == 0):
-                checkpoint = write_checkpoint()
-                info(f"    （断点已保存：{len(CTX.rows)} 个 → {checkpoint}）")
+                with measured("checkpoint"):
+                    checkpoint = write_checkpoint()
+                    info(f"    （断点已保存：{len(CTX.rows)} 个 → {checkpoint}）")
 
         elapsed = time.time() - t_start
         step("完成")
@@ -3653,10 +4131,14 @@ def main():
         cus = sum(1 for r in CTX.rows if r[5] == "自建商品")
         nop = sum(1 for r in CTX.rows if r[5] == "未打开")
         thr = sum(1 for r in CTX.rows if r[5] == "限流")
+        multi = sum(1 for r in CTX.rows if r[5] == "多SKU")
+        sku_count = sum(len(CTX.sku_rows.get(int(r[0]), [])) if r[5] == "多SKU" else 1
+                        for r in CTX.rows)
         info(f"校验：成功 {okn}，未找到 {bad}，详情不全 {thin}，"
-             f"自建商品 {cus}，未打开 {nop}，限流 {thr}，"
-             f"未校验 {n - okn - bad - thin - cus - nop - thr}")
+             f"自建商品 {cus}，多SKU卡 {multi}，未打开 {nop}，限流 {thr}，"
+             f"未校验 {n - okn - bad - thin - cus - multi - nop - thr}；SKU行 {sku_count}")
         CTX.stop_reason = stop_reason
+        info("分项耗时：" + json.dumps(scan_metrics(), ensure_ascii=False))
         CTX.finished_at = datetime.now()
         if CTX.throttle_hits:
             warn(f"本轮撞平台限流 {CTX.throttle_hits} 次（接口 429）。频繁触发可能影响账号，"
@@ -3670,6 +4152,21 @@ def main():
                  + (f"，未命中 {unseen} 个（按当日实际可见处理，已全部走详情页或不在列表）"
                     if unseen else ""))
 
+    except C.CaptureContractError as exc:
+        if not str(exc).startswith(MULTISPEC_ERROR):
+            raise
+        # 多规格详情装不下单行契约：不是采集故障，是采集契约的边界。
+        # 保留断点与 partial 清单，停掉本分片——继续扫只会把后面的商品
+        # 也拖进同一个不可表达的分片。
+        CTX.final_state = "partial"
+        CTX.stop_reason = CTX.stop_reason or str(exc)[:128]
+        warn(CTX.stop_reason)
+        warn("已保存断点与 partial 清单；本分片按 SKU 展开采集后才能继续。")
+        try:
+            tap_back(None)      # 详情页还开着：回列表再停
+            time.sleep(0.7)
+        except Exception:
+            pass
     except Exception as exc:
         if not CTX.interrupted:
             CTX.final_state = "failed"

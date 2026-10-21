@@ -1,0 +1,40 @@
+{
+  "F1_resume_hint_keeps_safe_flags": {
+    "cli_args_had_flags": false,
+    "hint_has_capture_only": true,
+    "hint_has_commit": false,
+    "hint_has_observe_exceptions": true,
+    "manifest_has_contract": true
+  },
+  "F2_contract_only_with_observation_content": {
+    "plain_success": {
+      "exceptions": [],
+      "has_contract": false,
+      "state": "success"
+    },
+    "with_exceptions": {
+      "business_complete": false,
+      "contract": "v1",
+      "has_contract": true,
+      "state": "observed_with_exceptions"
+    }
+  },
+  "F4_upgrade_needs_identity_multiset": {
+    "other_identity_same_count": {
+      "state": "partial",
+      "stop_reason": "列表证据与采集行身份不一致：卡片身份多重集与采集行不一致（卡片多出 [('另一个商品', '100g')]，采集行多出 [('商品A', '100g')]）"
+    }
+  },
+  "real_observed_aggregate": {
+    "evidence_warnings": [],
+    "manifest": "qnh_acceptance/20261021/observations/aggregation/work/qnh_category_full_20261021-183630.manifest.json",
+    "relaxed_gate_ok": true,
+    "state": "observed_with_exceptions",
+    "strict_errors": [
+      "manifest 不是 success：observed_with_exceptions",
+      "segment 未完成（观测终态，业务不完整）：萌宠专区/猫粮=observed_with_exceptions",
+      "segment 未完成（观测终态，业务不完整）：萌宠专区/猫零食=observed_with_exceptions"
+    ],
+    "strict_gate_ok": false
+  }
+}

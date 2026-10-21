@@ -132,6 +132,18 @@ class DailyCompletionTests(unittest.TestCase):
 
 
 class DailyLaunchTests(unittest.TestCase):
+    def test_stop_is_idempotent_after_launchd_service_disappears(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(launch, "ROOT", directory), \
+             mock.patch.object(launch, "_launchctl", return_value=subprocess.CompletedProcess(
+                 [], 3, stdout="", stderr="Boot-out failed: 3: No such process")):
+            out_dir, path = launch.paths_for("20261020")
+            os.makedirs(out_dir)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("stale plist")
+            launch.stop("20261020")
+            self.assertFalse(os.path.exists(path))
+
     def test_plist_is_explicitly_one_shot(self):
         payload = launch.plist_for("20261020")
         self.assertIs(payload["RunAtLoad"], True)
@@ -169,7 +181,7 @@ class CarryStatusTests(unittest.TestCase):
         self.assertEqual(C.row_detail_errors(row), [])
         self.assertNotIn("携带", C.LISTING_STATUS_MAP.values())
 
-    def test_carry_row_passes_strict_gate(self):
+    def test_carry_row_fails_strict_gate_without_current_detail_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             prefix = os.path.join(directory, "qnh_scan_20261016-000500")
             csv_path = prefix + ".csv"
@@ -199,7 +211,8 @@ class CarryStatusTests(unittest.TestCase):
             C.atomic_write_json(manifest_path, manifest)
             report = C.validate_manifest(
                 manifest_path, require_complete=True, expected_profile=profile)
-            self.assertTrue(report.ok, report.errors)
+            self.assertFalse(report.ok)
+            self.assertTrue(any("携带" in error for error in report.errors), report.errors)
 
     def test_carry_price_key_normalizes_amounts(self):
         self.assertEqual(C.carry_price_key("45.00"), C.carry_price_key("45"))
@@ -227,12 +240,12 @@ class CarryCompareTests(unittest.TestCase):
                        ("美团闪购价", "饿了么价", "京东到家价", "采购价")],
         }
 
-    def test_identical_fingerprint_carries(self):
+    def test_identical_fingerprint_does_not_reuse_historical_details(self):
         import qnh_product_scan as scan
         card = self.make_card(["45", "50", "55", "3.5"])
-        self.assertEqual(
+        self.assertIsNone(
             scan.compare_card_baseline(card, {"fingerprint": self.fingerprint(card),
-                                              "detail": ["d"]}), ["d"])
+                                              "detail": ["d"]}))
 
     def test_persistent_price_change_still_triggers(self):
         import qnh_product_scan as scan
@@ -241,19 +254,19 @@ class CarryCompareTests(unittest.TestCase):
         self.assertIsNone(scan.compare_card_baseline(
             today, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
 
-    def test_amount_format_difference_still_carries(self):
+    def test_amount_format_difference_still_requires_visit(self):
         import qnh_product_scan as scan
         base = self.make_card(["45", "50", "55", "3.5"])
         today = self.make_card(["45.00", "50.0", "55", "3.50"])
-        self.assertIsNotNone(scan.compare_card_baseline(
+        self.assertIsNone(scan.compare_card_baseline(
             today, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
 
-    def test_unknown_baseline_price_component_does_not_trigger(self):
+    def test_unknown_baseline_price_component_still_requires_visit(self):
         import qnh_product_scan as scan
         today = self.make_card(["45", "50", "55", "无数据"])
         baseline = self.fingerprint(self.make_card(["45", "50", "55", "45"]))
         baseline["prices"][3] = None
-        self.assertIsNotNone(scan.compare_card_baseline(
+        self.assertIsNone(scan.compare_card_baseline(
             today, {"fingerprint": baseline, "detail": ["d"]}))
 
     def test_concrete_baseline_price_still_triggers(self):
@@ -263,12 +276,12 @@ class CarryCompareTests(unittest.TestCase):
         self.assertIsNone(scan.compare_card_baseline(
             today, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
 
-    def test_stock_month_and_sold_out_changes_do_not_trigger(self):
-        # 今日列表卡已经提供月售/库存/售罄；详情专属字段由周期全量刷新。
+    def test_stock_month_and_sold_out_changes_require_visit(self):
+        # 未建立逐字段详情来源时间前，所有商品都实访。
         import qnh_product_scan as scan
         base = self.make_card(["45", "50", "55", "3.5"])
         today = dict(base, month_sales="999", stock="", sold_out=True)
-        self.assertIsNotNone(scan.compare_card_baseline(
+        self.assertIsNone(scan.compare_card_baseline(
             today, {"fingerprint": self.fingerprint(base), "detail": ["d"]}))
 
     def test_spec_or_promo_triggers(self):

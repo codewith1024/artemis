@@ -1,0 +1,28 @@
+{
+  "active_capture_or_loader": [],
+  "db_connection_or_write": false,
+  "db_connections_opened": 0,
+  "device": {
+    "animation_scales": {
+      "animator": "1",
+      "transition": "1",
+      "window": "1"
+    },
+    "density": "Physical density: 420",
+    "display_power": "Display Power: state=OFF",
+    "note": "本轮验证全部离线：扫描器收尾路径里的设备动作（stop_recording / helper_teardown / restore_display / restore_a11y / _set_animations）都打了桩，没有点过手机。",
+    "screen": "Physical size: 1440x3040\nOverride size: 1080x2280",
+    "touched": false
+  },
+  "historical_20261020_unchanged": true,
+  "real_capture_artifacts_unchanged": {
+    "cat_food_csv": true,
+    "cat_snacks_csv": true
+  },
+  "scratch_outputs_outside_project": [
+    "/tmp/qnh-obs-cli",
+    "/tmp/dbg_f2.py",
+    "/tmp/dbg_f3.py",
+    "/tmp/dbg_f4.py"
+  ]
+}

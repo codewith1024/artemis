@@ -95,10 +95,10 @@ class ProductIdentityTests(unittest.TestCase):
         b = {"title": "商品", "barcode": "1111111111111", "spec": "200g"}
         self.assertFalse(scan.same_product(a, b))
 
-    def test_barcode_less_identity_ignores_spec_changes(self):
+    def test_barcode_less_identity_preserves_spec_changes(self):
         a = {"title": "同一自建商品", "barcode": "", "spec": "S码"}
         b = {"title": "同一自建商品", "barcode": "", "spec": "M码"}
-        self.assertTrue(scan.same_product(a, b))
+        self.assertFalse(scan.same_product(a, b))
 
     def test_title_fallback_for_barcode_less_product(self):
         a = {"title": "自建商品", "barcode": ""}
@@ -135,6 +135,59 @@ class ProductIdentityTests(unittest.TestCase):
         self.assertFalse(scan.is_done(
             {"title": "认养一头牛 茉莉荔枝", "barcode": "6977174081089",
              "spec": "65g/支"}, marks))
+    def test_spec_optional_product_titles_are_not_metadata(self):
+        for title in (
+            "规格可选 高粘透明纳米胶带 无痕双面胶透明魔力胶带可水洗强力胶 宽2cm/卷",
+            "规格可选 梦瑾牛皮纸车线笔记本72页/本 简约纯色A4/A5/B5记事本练习本作业本",
+        ):
+            nodes = [node(title, 388, 544, 1053, 642),
+                     node("规格：可选", 388, 651, 800, 692),
+                     node("月售：2", 388, 697, 492, 738)]
+            for item in nodes:
+                item["w"] = item["x2"] - item["x1"]
+                item["h"] = item["y2"] - item["y1"]
+            products = scan.find_products(nodes, set())
+            self.assertEqual([p["title"] for p in products], [title])
+        self.assertTrue(scan.META_PAT.match("规格：可选"))
+        self.assertTrue(scan.META_PAT.match("规格"))
+
+    def test_page_overlap_requires_ordered_boundary_not_arbitrary_shared_card(self):
+        def page(*names):
+            return [{"title": name, "barcode": "", "spec": ""} for name in names]
+        self.assertTrue(scan.overlapping_pages(page("A", "B", "C"), page("C", "D")))
+        self.assertTrue(scan.overlapping_pages(page("A", "B", "C"), page("B", "C", "D")))
+        self.assertFalse(scan.overlapping_pages(page("A", "B", "C"), page("A", "D")))
+        self.assertFalse(scan.overlapping_pages(page("A", "B"), page("D", "E")))
+
+    def test_advance_repairs_gap_locally_and_reuses_returned_nodes(self):
+        def product(name, y):
+            return {"title": name, "barcode": "", "spec": "", "box": (400, y, 1000, y + 100)}
+        previous = [product("A", 500), product("B", 1200)]
+        skipped = [product("D", 500)]
+        repaired = [product("B", 500), product("C", 1200)]
+        scan.CTX.timings = {}
+        scan.CTX.traversal_counts = {}
+        with mock.patch.object(scan, "human_swipe"), \
+                mock.patch.object(scan, "sh") as shell, \
+                mock.patch.object(scan, "wait_list_after_scroll", side_effect=[
+                    (["gap"], skipped), (["repaired"], repaired)]), \
+                mock.patch.object(scan.time, "sleep"):
+            nodes, products = scan.advance_product_list(previous, 1080, 4560, scan.PACING["ultra"])
+        self.assertEqual(nodes, ["repaired"])
+        self.assertEqual(products, repaired)
+        self.assertEqual(scan.CTX.traversal_counts["local_repairs"], 1)
+        self.assertEqual(shell.call_count, 1)
+
+    def test_advance_refuses_unproven_coverage(self):
+        previous = [{"title": "A", "barcode": "", "box": (400, 500, 1000, 600)}]
+        skipped = [{"title": "Z", "barcode": "", "box": (400, 500, 1000, 600)}]
+        with mock.patch.object(scan, "human_swipe"), \
+                mock.patch.object(scan, "sh"), \
+                mock.patch.object(scan, "wait_list_after_scroll", return_value=([], skipped)), \
+                mock.patch.object(scan.time, "sleep"):
+            with self.assertRaises(scan.C.CaptureContractError):
+                scan.advance_product_list(previous, 1080, 4560, scan.PACING["ultra"])
+
     def test_anchor_scroll_uses_exact_adb_distance(self):
         old_semantic = scan.HelperState.has_semantic_scroll
         scan.HelperState.has_semantic_scroll = True
@@ -148,6 +201,15 @@ class ProductIdentityTests(unittest.TestCase):
             shell.assert_called_once_with("input swipe 702 3648 702 1909 4576")
         finally:
             scan.HelperState.has_semantic_scroll = old_semantic
+
+    def test_open_detail_never_taps_stale_coordinates_when_target_disappears(self):
+        product = {"title": "目标", "barcode": "", "tap": (600, 800),
+                   "box": (400, 700, 900, 900)}
+        with mock.patch.object(scan, "dump_xml", return_value="list"), \
+                mock.patch.object(scan, "parse_nodes", return_value=[]), \
+                mock.patch.object(scan, "sh") as shell:
+            self.assertFalse(scan.open_detail(product, (0, 0)))
+        shell.assert_not_called()
 
     def test_open_detail_uses_adb_tap_not_helper_tap(self):
         prod = {"title": "商品A", "barcode": "6900000000001", "spec": "100g",

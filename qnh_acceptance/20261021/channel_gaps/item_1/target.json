@@ -1,0 +1,32 @@
+{
+  "title": "【喔喔WOWO】全价鲜肉猫粮 鳕鱼虾味 1kg/袋 冻干营养猫粮青春版成猫幼猫粮",
+  "barcode": "",
+  "tap": [
+    720,
+    2866
+  ],
+  "box": [
+    388,
+    2817,
+    1053,
+    2915
+  ],
+  "anchor_y": 2924,
+  "spec": "鳕鱼虾味1kg，鳕鱼虾味40g",
+  "spec_node": {
+    "text": "规格：鳕鱼虾味1kg，鳕鱼虾味40g",
+    "desc": "",
+    "cls": "android.widget.TextView",
+    "pkg": "com.sankuai.scsx.android.shuguopai",
+    "clickable": false,
+    "detail_title": false,
+    "x1": 388,
+    "y1": 2924,
+    "x2": 836,
+    "y2": 2965,
+    "cx": 612,
+    "cy": 2944,
+    "w": 448,
+    "h": 41
+  }
+}

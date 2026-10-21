@@ -1,0 +1,68 @@
+{
+  "cat_food": {
+    "manifest": "qnh_acceptance/20261021/observations/cat_food/qnh_scan_20261021-165935_ae749bb2.manifest.json",
+    "state": "observed_with_exceptions",
+    "platform_count": 52,
+    "visible_cards": 51,
+    "sku_count": 65,
+    "detail_complete_cards": 49,
+    "local_observation_gate": true,
+    "strict_business_gate": false,
+    "strict_errors": [
+      "manifest 不是 success：observed_with_exceptions",
+      "商品数不完整：CSV 51 / 平台 52"
+    ],
+    "observation_complete": true,
+    "business_complete": false,
+    "exceptions": [
+      {
+        "platform_count": 52,
+        "type": "platform_count_mismatch",
+        "visible_card_count": 51
+      },
+      {
+        "channel": "京东到家",
+        "sku": "2098339639743791201",
+        "spec": "鳕鱼虾味40g",
+        "type": "channel_row_absent"
+      },
+      {
+        "channel": "美团闪购",
+        "sku": "2112073004715569247",
+        "spec": "3包",
+        "type": "channel_row_absent"
+      },
+      {
+        "channel": "京东到家",
+        "sku": "2112073004715569247",
+        "spec": "3包",
+        "type": "channel_row_absent"
+      }
+    ],
+    "loader_refused_before_connection": "多SKU采集产物暂不支持入库：scope.sku_mode='sidecar_v1'，多SKU行数=0"
+  },
+  "cat_snacks": {
+    "manifest": "qnh_acceptance/20261021/observations/cat_snacks/qnh_scan_20261021-171203_02009d89.manifest.json",
+    "state": "observed_with_exceptions",
+    "platform_count": 44,
+    "visible_cards": 43,
+    "sku_count": 47,
+    "detail_complete_cards": 43,
+    "local_observation_gate": true,
+    "strict_business_gate": false,
+    "strict_errors": [
+      "manifest 不是 success：observed_with_exceptions",
+      "商品数不完整：CSV 43 / 平台 44"
+    ],
+    "observation_complete": true,
+    "business_complete": false,
+    "exceptions": [
+      {
+        "platform_count": 44,
+        "type": "platform_count_mismatch",
+        "visible_card_count": 43
+      }
+    ],
+    "loader_refused_before_connection": "多SKU采集产物暂不支持入库：scope.sku_mode='sidecar_v1'，多SKU行数=0"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "active_capture_or_loader": [],
+  "db_connection_or_write": false,
+  "db_connections_opened": 0,
+  "device": {
+    "animation_scales": {
+      "animator": "1",
+      "transition": "1",
+      "window": "1"
+    },
+    "density": "Physical density: 420",
+    "display_power": "Display Power: state=OFF",
+    "focused_app": "mCurrentFocus=Window{9046763 u0 NotificationShade}",
+    "note": "写验证脚本时误触了一次（collect_list_observation 未打桩）：只解析商品、切了 dump 模式、关了动画。没有采集商品、没有写库、没有留采集文件；动画已恢复为 1，屏幕/密度与上一轮收尾一致。",
+    "products_captured": 0,
+    "screen": "Physical size: 1440x3040\nOverride size: 1080x2280"
+  },
+  "historical_20261020_unchanged": true,
+  "real_capture_artifacts_unchanged": {
+    "cat_food_csv": true,
+    "cat_snacks_csv": true
+  },
+  "scratch_outputs_outside_project": [
+    "/tmp/qnh-obs-cli",
+    "/tmp/qnh-device-state.png",
+    "/tmp/dbg_seg.py",
+    "/tmp/dbg2.py",
+    "/tmp/dbg3.py",
+    "/tmp/dbg4.py",
+    "/tmp/dbg5.py",
+    "/tmp/dbg6.py"
+  ]
+}

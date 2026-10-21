@@ -1,0 +1,32 @@
+{
+  "title": "【10种面值可选】筹码币 德州扑克筹码棋牌室麻将卡片筹码代币炸金花打牌专用娱乐筹码卡1张",
+  "barcode": "",
+  "tap": [
+    720,
+    3153
+  ],
+  "box": [
+    388,
+    3079,
+    1053,
+    3228
+  ],
+  "anchor_y": 3237,
+  "spec": "20，2，500，100，1，1000，10，5，200，50",
+  "spec_node": {
+    "text": "规格：20，2，500，100，1，1000，10，5，200，50",
+    "desc": "",
+    "cls": "android.widget.TextView",
+    "pkg": "com.sankuai.scsx.android.shuguopai",
+    "clickable": false,
+    "detail_title": false,
+    "x1": 388,
+    "y1": 3237,
+    "x2": 1053,
+    "y2": 3322,
+    "cx": 720,
+    "cy": 3279,
+    "w": 665,
+    "h": 85
+  }
+}

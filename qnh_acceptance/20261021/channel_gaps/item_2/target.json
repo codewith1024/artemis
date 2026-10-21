@@ -1,0 +1,32 @@
+{
+  "title": "网易严选 宠爱相伴猫粮 1.8kg/袋 粮全价全期猫粮成猫幼猫通用",
+  "barcode": "",
+  "tap": [
+    720,
+    2699
+  ],
+  "box": [
+    388,
+    2650,
+    1053,
+    2748
+  ],
+  "anchor_y": 2757,
+  "spec": "1包，3包",
+  "spec_node": {
+    "text": "规格：1包，3包",
+    "desc": "",
+    "cls": "android.widget.TextView",
+    "pkg": "com.sankuai.scsx.android.shuguopai",
+    "clickable": false,
+    "detail_title": false,
+    "x1": 388,
+    "y1": 2757,
+    "x2": 596,
+    "y2": 2798,
+    "cx": 492,
+    "cy": 2777,
+    "w": 208,
+    "h": 41
+  }
+}

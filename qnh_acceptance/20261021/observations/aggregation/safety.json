@@ -1,0 +1,20 @@
+{
+  "active_capture_or_loader": [],
+  "db_connection_or_write": false,
+  "db_connections_opened": 0,
+  "device_touched": false,
+  "historical_20261020_unchanged": true,
+  "real_capture_artifacts_unchanged": {
+    "cat_food_csv": true,
+    "cat_snacks_csv": true
+  },
+  "scratch_outputs_outside_project": [
+    "/tmp/qnh-obs-cli",
+    "/tmp/dbg_seg.py",
+    "/tmp/dbg2.py",
+    "/tmp/dbg3.py",
+    "/tmp/dbg4.py",
+    "/tmp/dbg5.py",
+    "/tmp/dbg6.py"
+  ]
+}

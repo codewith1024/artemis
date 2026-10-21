@@ -1,0 +1,12 @@
+{
+  "analyze.py": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_analyze.py",
+  "verify.py": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_verify.py",
+  "verify4.py": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_verify4.py",
+  "dupcheck.py": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_dupcheck.py",
+  "footer.py": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_footer.py",
+  "a_food.txt": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_a_food.txt",
+  "a_snacks.txt": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_a_snacks.txt",
+  "verify.txt": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_verify.txt",
+  "dupcheck.txt": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_dupcheck.txt",
+  "footer.txt": "/Users/jalen/artemis/qnh_acceptance/20261021/count_gaps/raw_xml_footer.txt"
+}

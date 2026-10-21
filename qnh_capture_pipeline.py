@@ -94,9 +94,23 @@ def _resume_hint(manifest_path, args):
         command.append("--record")
     if dismiss_order_dialogs:
         command.append("--dismiss-order-dialogs")
+    # 安全开关按 manifest 推导，不只看本次命令行：观测契约产物续跑必须带
+    # --observe-exceptions（否则扫描器直接拒），而 --observe-exceptions 只能
+    # 与 --capture-only 同用——两个一起补上，给出的命令才真能跑。
+    observed_artifact = bool(C.text_value(capture.get("observation_contract")))
+    if getattr(args, "capture_only", False) or observed_artifact:
+        command.append("--capture-only")
+    if getattr(args, "observe_exceptions", False) or observed_artifact:
+        command.append("--observe-exceptions")
     if getattr(args, "require_helper", False):
         command.append("--require-helper")
     return shlex.join(command)
+
+
+def _is_aggregate(manifest):
+    """分片聚合产物（scope.mode=segment）不是一次采集，不能当断点续跑。"""
+    scope = (manifest or {}).get("scope") or {}
+    return scope.get("mode") == C.SEGMENT_MODE
 
 
 def _restart_hint(args):
@@ -119,6 +133,10 @@ def _restart_hint(args):
         command.append("--record")
     if getattr(args, "dismiss_order_dialogs", False):
         command.append("--dismiss-order-dialogs")
+    if getattr(args, "capture_only", False):
+        command.append("--capture-only")
+    if getattr(args, "observe_exceptions", False):
+        command.append("--observe-exceptions")
     if getattr(args, "require_helper", False):
         command.append("--require-helper")
     return shlex.join(command)
@@ -194,6 +212,8 @@ def run_capture(args, profile):
         command.append("--record")
     if args.dismiss_order_dialogs:
         command.append("--dismiss-order-dialogs")
+    if getattr(args, "observe_exceptions", False):
+        command.append("--observe-exceptions")
     if getattr(args, "require_helper", False):
         command.append("--require-helper")
     if args.category:
@@ -261,9 +281,13 @@ def main():
     parser.add_argument("--resume", help="父 manifest 或 CSV")
     parser.add_argument("--from-manifest", help="跳过采集，直接 gate/load 既有 final manifest")
     parser.add_argument("--capture-only", action="store_true")
+    parser.add_argument("--observe-exceptions", action="store_true",
+                        help="仅 capture-only：保留有证据的平台计数差和渠道缺行，业务完整性仍失败")
     parser.add_argument("--commit", action="store_true",
                         help="显式提交；不加则完整事务验证后 rollback")
     args = parser.parse_args()
+    if args.observe_exceptions and (not args.capture_only or args.commit):
+        parser.error("--observe-exceptions 只能用于 --capture-only，不能提交或执行数据库 dry-run")
     if args.resume and args.from_manifest:
         parser.error("--resume 与 --from-manifest 不能同时使用")
     manifest_path = None
@@ -316,6 +340,11 @@ def main():
             raise SystemExit(1)
 
         if args.capture_only:
+            local_gate = C.validate_manifest(
+                manifest_path, require_complete=False, expected_profile=profile)
+            _print_gate(local_gate)
+            if not local_gate.ok:
+                raise C.CaptureContractError(C.format_gate_report(local_gate))
             print(f"capture-only 完成：{manifest_path}")
             return
 
@@ -333,7 +362,18 @@ def main():
                 "gate": gate.as_dict(),
                 "scan_exit_code": scan_exit,
             }
-            if relaxed.ok and relaxed.row_count > 0:
+            if _is_aggregate(relaxed.manifest):
+                # 聚合产物（叶子类目分片的并集）不是一次采集：续跑/重采的起点
+                # 都是单个类目的采集产物，给聚合发采集命令只会报错。指向分片器
+                # 的观测模式。
+                result["restart_command"] = shlex.join([
+                    sys.executable, os.path.join(ROOT, "qnh_category_pipeline.py"),
+                    "--observe-exceptions", "--capture-only",
+                ])
+                guidance = ("未触碰数据库。该 manifest 是分片聚合产物，不可续跑、"
+                            "不可入库：请用分片器的观测模式重采异常分片后重新聚合：\n"
+                            + result["restart_command"])
+            elif relaxed.ok and relaxed.row_count > 0:
                 result["resume_command"] = _resume_hint(manifest_path, args)
                 guidance = "未触碰数据库。续跑命令：\n" + result["resume_command"]
             else:

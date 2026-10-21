@@ -94,7 +94,9 @@ def stop(run_date):
     target = _target(run_date)
     stopped = _launchctl("bootout", target)
     message = (stopped.stderr + stopped.stdout).strip()
-    if stopped.returncode != 0 and "Could not find service" not in message:
+    if (stopped.returncode != 0
+            and "Could not find service" not in message
+            and "No such process" not in message):
         raise RuntimeError(message)
     _, path = paths_for(run_date)
     try:

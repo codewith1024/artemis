@@ -1,0 +1,12 @@
+{
+  "processes": [],
+  "size": "Physical size: 1440x3040\nOverride size: 1080x2280\n",
+  "density": "Physical density: 420\n",
+  "animations": {
+    "window_animation_scale": "1",
+    "transition_animation_scale": "1",
+    "animator_duration_scale": "1"
+  },
+  "historical_csv_unchanged": true,
+  "historical_manifest_unchanged": true
+}

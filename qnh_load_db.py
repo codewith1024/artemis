@@ -43,6 +43,44 @@ def die(message):
     raise SystemExit(f"错误：{message}")
 
 
+def _reject_multi_sku(manifest, rows):
+    """多 SKU 采集产物是 capture-only：进库前就拒，绝不让旧 loader 默读。
+
+    不看 require_complete：只要 manifest 声明了 scope.sku_mode（或 CSV 里出现
+    多SKU 行），这份产物就没有「一行一 SKU」的旧契约，入库必然错位。
+    """
+    scope = (manifest or {}).get("scope") or {}
+    multi_rows = [index for index, row in enumerate(rows or [], 1)
+                  if C.text_value(row.get("状态")) == C.MULTISKU_STATUS]
+    if scope.get("sku_mode") or multi_rows:
+        raise C.CaptureContractError(
+            "多SKU采集产物暂不支持入库："
+            f"scope.sku_mode={scope.get('sku_mode')!r}，多SKU行数={len(multi_rows)}")
+
+
+def _reject_observed_manifest(manifest):
+    """观测契约产物（capture.observation_contract='v1'）不入库。
+
+    例外态 observed_with_exceptions 是「观测完成」，不是「业务完整」：平台标题
+    数与可见卡片数对不上、或有渠道行缺失，这份快照不能当成当日真值写进库。
+    在打开数据库连接之前就拒：连都不连。旧版 partial 显式模式（直接 CSV
+    路径）不受影响。
+    """
+    manifest = manifest or {}
+    capture = manifest.get("capture") or {}
+    if C.text_value(capture.get("observation_contract")) != C.OBSERVATION_CONTRACT_VERSION:
+        return
+    state = C.text_value(manifest.get("state"))
+    if state != "success":
+        raise C.CaptureContractError(
+            f"观测契约产物不入库：state={state!r}（只有 success 可入库）")
+    progress = manifest.get("progress") or {}
+    if progress.get("business_complete") is not True:
+        raise C.CaptureContractError(
+            "观测契约产物不入库：progress.business_complete 不是 true："
+            f"{progress.get('business_complete')!r}")
+
+
 def read_csv(path):
     rows, fields = C.read_csv_rows(path)
     missing = [column for column in BASE_COLUMNS if column not in fields]
@@ -253,6 +291,14 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
                  expected_profile=None, profiles_file=C.DEFAULT_PROFILE_FILE,
                  allow_legacy_partial_commit=False):
     if manifest_path:
+        try:
+            raw_manifest = C.read_json(os.path.abspath(manifest_path))
+        except C.CaptureContractError:
+            raw_manifest = {}
+        # 观测契约先判：例外态产物入库的理由要说准（观测终态，不是多 SKU），
+        # 但两种都在连库之前拒。
+        _reject_observed_manifest(raw_manifest)
+        _reject_multi_sku(raw_manifest, None)
         context = _manifest_context(
             os.path.abspath(manifest_path), expected_profile=expected_profile,
             profiles_file=profiles_file)
@@ -288,6 +334,7 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
         }
 
     rows = read_csv(context["csv_path"])
+    _reject_multi_sku(context.get("manifest"), rows)
     times = C.row_times(context["csv_path"], rows)
     valid_times = [value for value in times if value]
     if not valid_times:
@@ -461,9 +508,13 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
                         source.get("SKU"), source.get("SPU"))
                     fact_fields = C.fact_fields_from_csv(
                         source, channel, price_column, context["csv_path"])
+                    # 每行事实的 snapshot_hour 取该行采集时间所在小时；批次小时
+                    # 只留在 store_snapshot 上，不套到全部事实行。
+                    row_hour = (collected_at.replace(minute=0, second=0, microsecond=0)
+                                if collected_at else hour)
                     insert(cur, "fact_store_product_snapshot", dict(
                         batch_id=context["batch_id"], store_snapshot_id=context["snapshot_id"],
-                        snapshot_hour=hour, collected_at=collected_at, capture_method="app_ui",
+                        snapshot_hour=row_hour, collected_at=collected_at, capture_method="app_ui",
                         channel_code=channel, store_code=context["store_code"],
                         store_name=context["store_name"], store_role=context["role"],
                         category_name=row_category_l1, sub_category_name=row_category_l2,
@@ -471,12 +522,18 @@ def load_capture(*, csv_path=None, manifest_path=None, require_complete=False,
                     written += 1
                     standard = master_matches.get(C.text_value(source.get("条码")))
                     if standard:
+                        # 不写 source_sku_id：uk_map_source_sku(channel_code,source_sku_id)
+                        # 与「同 SKU 同名多规格 = 多个 listing」互斥，第二个 listing 会被
+                        # INSERT IGNORE 静默吞掉 → map 少一行 → 校验失败整批回滚。平台
+                        # SKU 已按行留在事实表 fact_store_product_snapshot.source_sku_id。
                         cur.execute(
                             "INSERT IGNORE INTO map_source_sku_standard"
-                            " (channel_code,listing_key,listing_type,product_name,spec_name,upc,"
+                            " (channel_code,listing_key,listing_type,source_spu_id,"
+                            " product_name,spec_name,upc,"
                             " standard_spu_id,standard_sku_id,match_status,match_method,match_score,remark)"
-                            " VALUES (%s,%s,'barcode',%s,%s,%s,%s,%s,'matched','upc',1.0000,%s)",
-                            (channel, key, C.text_value(source.get("商品名称")),
+                            " VALUES (%s,%s,'barcode',%s,%s,%s,%s,%s,%s,'matched','upc',1.0000,%s)",
+                            (channel, key, field_value(source.get("SPU")),
+                             C.text_value(source.get("商品名称")),
                              field_value(source.get("规格")), C.text_value(source.get("条码")),
                              standard[0], standard[1],
                              "牵牛花采集：13位 UPC 精确匹配"))

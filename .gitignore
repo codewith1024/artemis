@@ -126,3 +126,20 @@ qnh_scan_*.progress.json
 qnh_scan_*.manifest.json
 qnh_scan_*.result.json
 .a11y_backup.txt
+
+# 每日增量采集的原始产物（1.5GB）：分片 CSV/manifest、逐屏列表证据、录像。
+# 业务数据不入版本库；验收报告与核对结果在 qnh_acceptance/ 下另存。
+qnh_daily/
+
+# 验收原始证据（设备 dump、截图、日志、中间产物）同样不入库；
+# 保留的是报告与核对结果（*.md、summary/verification/safety/target 等 JSON）。
+qnh_acceptance/**/*.xml
+qnh_acceptance/**/*.png
+qnh_acceptance/**/*.log
+qnh_acceptance/**/*.txt
+qnh_acceptance/**/*.navigation
+qnh_acceptance/**/*.csv
+qnh_acceptance/**/*.skus.json
+qnh_acceptance/**/qnh_category_full_*.manifest.json
+qnh_acceptance/**/inventory.json
+qnh_acceptance/**/capture.state.json

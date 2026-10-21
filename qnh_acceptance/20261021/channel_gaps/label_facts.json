@@ -1,0 +1,34 @@
+{
+  "item_1": [
+    {
+      "visit": 0,
+      "has_not_online_label": false,
+      "has_off_shelf_label": false,
+      "channel_section_count": 3,
+      "screens": 4
+    },
+    {
+      "visit": 1,
+      "has_not_online_label": false,
+      "has_off_shelf_label": false,
+      "channel_section_count": 3,
+      "screens": 4
+    }
+  ],
+  "item_2": [
+    {
+      "visit": 0,
+      "has_not_online_label": false,
+      "has_off_shelf_label": false,
+      "channel_section_count": 3,
+      "screens": 4
+    },
+    {
+      "visit": 1,
+      "has_not_online_label": false,
+      "has_off_shelf_label": false,
+      "channel_section_count": 3,
+      "screens": 4
+    }
+  ]
+}

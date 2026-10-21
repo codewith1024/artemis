@@ -1,0 +1,31 @@
+{
+  "cat_food": {
+    "platform_title_count": 52,
+    "rendered_card_count": 51,
+    "unique_card_count": 51,
+    "detail_cards_checked": 51,
+    "sku_count": 65,
+    "unique_sku_count": 65,
+    "list_page_count": 22,
+    "channel_detail_issues": [
+      {
+        "name": "【喔喔WOWO】全价鲜肉猫粮 鳕鱼虾味 1kg/袋 冻干营养猫粮青春版成猫幼猫粮",
+        "error": "渠道「京东到家」已上架但缺 SKU「鳕鱼虾味40g」的行"
+      },
+      {
+        "name": "网易严选 宠爱相伴猫粮 1.8kg/袋 粮全价全期猫粮成猫幼猫通用",
+        "error": "渠道「美团闪购」已上架但缺 SKU「3包」的行"
+      }
+    ]
+  },
+  "cat_snacks": {
+    "platform_title_count": 44,
+    "rendered_card_count": 43,
+    "unique_card_count": 43,
+    "detail_cards_checked": 43,
+    "sku_count": 47,
+    "unique_sku_count": 47,
+    "list_page_count": 19,
+    "channel_detail_issues": []
+  }
+}

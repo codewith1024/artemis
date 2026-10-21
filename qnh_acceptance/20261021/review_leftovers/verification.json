@@ -1,0 +1,29 @@
+{
+  "F3_observation_failure_never_escapes": {
+    "contract_error": {
+      "exit_code": 1,
+      "message": "列表观测失败：列表观测未在150屏内确认读尽"
+    },
+    "list_evidence_error": {
+      "exit_code": 1,
+      "message": "列表证据复算失败：第 2 屏与上一屏没有边界重叠"
+    },
+    "unexpected_error": {
+      "exit_code": 1,
+      "message": "列表观测异常：RuntimeError: 设备掉线"
+    }
+  },
+  "F5_sidecar_lands_after_csv": {
+    "csv_exists": true,
+    "sidecar_exists": true,
+    "sidecar_write_saw_csv_on_disk": true
+  },
+  "F6_manifest_exception_keeps_evidence": {
+    "aggregate_manifest": "qnh_acceptance/20261021/observations/aggregation/work/qnh_category_full_20261021-181941.manifest.json",
+    "channel_row_absent_entries": 3,
+    "entries_with_evidence_pages": 3,
+    "entries_with_section_status": 3,
+    "evidence_warnings": [],
+    "relaxed_gate_ok": true
+  }
+}

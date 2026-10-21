@@ -1,0 +1,102 @@
+{
+  "aggregate_manifest": "qnh_acceptance/20261021/observations/aggregation/work/qnh_category_full_20261021-183630.manifest.json",
+  "business_complete": false,
+  "cross_category_duplicate_count": 2,
+  "db_connections_opened": 0,
+  "detail_complete_count": 90,
+  "exceptions": [
+    {
+      "platform_count": 52,
+      "segment": "萌宠专区/猫粮",
+      "type": "segment_platform_count_mismatch",
+      "visible_card_count": 51
+    },
+    {
+      "platform_count": 44,
+      "segment": "萌宠专区/猫零食",
+      "type": "segment_platform_count_mismatch",
+      "visible_card_count": 43
+    },
+    {
+      "channel": "京东到家",
+      "evidence_pages": [
+        {
+          "path": "/Users/jalen/artemis/qnh_acceptance/20261021/observations/cat_food/qnh_scan_20261021-165935_ae749bb2.detail_32_0.xml",
+          "sha256": "9426bc879eff15873e70c8673ec930723c464e5222c9764a48aa58c98d698155"
+        }
+      ],
+      "observation": "row_absent",
+      "reason": "已观察完整渠道表至其他信息，该 SKU 无对应行，不能推断规格级上架状态",
+      "section_status": "已上架",
+      "sku": "2098339639743791201",
+      "spec": "鳕鱼虾味40g",
+      "type": "channel_row_absent"
+    },
+    {
+      "channel": "京东到家",
+      "evidence_pages": [
+        {
+          "path": "/Users/jalen/artemis/qnh_acceptance/20261021/observations/cat_food/qnh_scan_20261021-165935_ae749bb2.detail_40_0.xml",
+          "sha256": "da0f433ca1f22001502512c3e1b59c8074d8918f43999a5d6656e514bc714b93"
+        }
+      ],
+      "observation": "row_absent",
+      "reason": "已观察完整渠道表至其他信息，该 SKU 无对应行，不能推断规格级上架状态",
+      "section_status": "已上架",
+      "sku": "2112073004715569247",
+      "spec": "3包",
+      "type": "channel_row_absent"
+    },
+    {
+      "channel": "美团闪购",
+      "evidence_pages": [
+        {
+          "path": "/Users/jalen/artemis/qnh_acceptance/20261021/observations/cat_food/qnh_scan_20261021-165935_ae749bb2.detail_40_0.xml",
+          "sha256": "da0f433ca1f22001502512c3e1b59c8074d8918f43999a5d6656e514bc714b93"
+        }
+      ],
+      "observation": "row_absent",
+      "reason": "已观察完整渠道表至其他信息，该 SKU 无对应行，不能推断规格级上架状态",
+      "section_status": "已上架",
+      "sku": "2112073004715569247",
+      "spec": "3包",
+      "type": "channel_row_absent"
+    }
+  ],
+  "listing_count": 92,
+  "loader_refused_before_connection": "CaptureContractError: 观测契约产物不入库：state='observed_with_exceptions'（只有 success 可入库）",
+  "local_observation_gate": true,
+  "local_observation_gate_errors": [],
+  "observation_complete": true,
+  "platform_product_count": 96,
+  "raw_segment_product_count": 94,
+  "segments": [
+    {
+      "captured_count": 51,
+      "expected_count": 52,
+      "leaf": "猫粮",
+      "state": "observed_with_exceptions",
+      "unique_count": 51
+    },
+    {
+      "captured_count": 43,
+      "expected_count": 44,
+      "leaf": "猫零食",
+      "state": "observed_with_exceptions",
+      "unique_count": 41
+    }
+  ],
+  "sidecar_listing_cards": 12,
+  "sidecar_observation_cards": [
+    "32",
+    "40"
+  ],
+  "sku_row_count": 110,
+  "state": "observed_with_exceptions",
+  "strict_business_gate": false,
+  "strict_business_gate_errors": [
+    "manifest 不是 success：observed_with_exceptions",
+    "segment 未完成（观测终态，业务不完整）：萌宠专区/猫粮=observed_with_exceptions",
+    "segment 未完成（观测终态，业务不完整）：萌宠专区/猫零食=observed_with_exceptions"
+  ]
+}
